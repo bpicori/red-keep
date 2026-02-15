@@ -203,6 +203,59 @@ func TestExec_WriteDenied(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Bypass prevention (rename/unlink on sensitive paths)
+// ---------------------------------------------------------------------------
+
+func TestExec_RenameDenied(t *testing.T) {
+	// mv from a sensitive path must be denied (prevents read bypass).
+	tmpDir := t.TempDir()
+	p := &profile.Profile{
+		AllowExec: true,
+		RWPaths:   []string{tmpDir},
+		Command:   []string{"/bin/mv", "/private/etc/shells", tmpDir + "/shells"},
+	}
+	_, stderr, exitCode := execSandbox(t, p)
+	if exitCode == 0 {
+		t.Fatal("expected non-zero exit when renaming from sensitive path")
+	}
+	if !strings.Contains(stderr, "Operation not permitted") && !strings.Contains(stderr, "Permission denied") {
+		t.Errorf("expected permission error in stderr, got: %s", stderr)
+	}
+}
+
+func TestExec_UnlinkDenied(t *testing.T) {
+	// rm on a sensitive path must be denied (prevents write bypass).
+	p := &profile.Profile{
+		AllowExec: true,
+		Command:   []string{"/bin/rm", "/private/etc/shells"},
+	}
+	_, stderr, exitCode := execSandbox(t, p)
+	if exitCode == 0 {
+		t.Fatal("expected non-zero exit when unlinking sensitive path")
+	}
+	if !strings.Contains(stderr, "Operation not permitted") && !strings.Contains(stderr, "Permission denied") {
+		t.Errorf("expected permission error in stderr, got: %s", stderr)
+	}
+}
+
+func TestExec_RenameAncestorDenied(t *testing.T) {
+	// Renaming a parent of a sensitive path must be denied (directory-swap attack).
+	tmpDir := t.TempDir()
+	p := &profile.Profile{
+		AllowExec: true,
+		RWPaths:   []string{tmpDir},
+		Command:   []string{"/bin/mv", "/private/etc", tmpDir + "/etc_backup"},
+	}
+	_, stderr, exitCode := execSandbox(t, p)
+	if exitCode == 0 {
+		t.Fatal("expected non-zero exit when renaming ancestor of sensitive path")
+	}
+	if !strings.Contains(stderr, "Operation not permitted") && !strings.Contains(stderr, "Permission denied") {
+		t.Errorf("expected permission error in stderr, got: %s", stderr)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Process fork control (AllowExec)
 // ---------------------------------------------------------------------------
 
@@ -417,9 +470,54 @@ func TestGenerateProfile_SensitivePathsDenied(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, sp := range darwinSensitivePaths {
-		want := `(deny file-read-data file-write-data (subpath "` + sp + `"))`
+		want := `(deny file-read* file-write* (subpath "` + sp + `"))`
 		if !strings.Contains(sbpl, want) {
 			t.Errorf("profile missing sensitive path deny rule for %s", sp)
+		}
+	}
+}
+
+func TestPathAncestors(t *testing.T) {
+	tests := []struct {
+		path string
+		want []string
+	}{
+		{"/private/etc/shadow", []string{"/private/etc", "/private"}},
+		{"/System/Library", []string{"/System"}},
+		{"/Library/Keychains", []string{"/Library"}},
+		{"/private/var/db/dslocal", []string{"/private/var/db", "/private/var", "/private"}},
+		{"/", nil},
+		{"/single", nil}, // only ancestor is / which we exclude
+	}
+	for _, tt := range tests {
+		got := pathAncestors(tt.path)
+		if len(got) != len(tt.want) {
+			t.Errorf("pathAncestors(%q) = %v, want %v", tt.path, got, tt.want)
+			continue
+		}
+		for i := range got {
+			if got[i] != tt.want[i] {
+				t.Errorf("pathAncestors(%q)[%d] = %q, want %q", tt.path, i, got[i], tt.want[i])
+			}
+		}
+	}
+}
+
+func TestGenerateProfile_BypassPreventionAncestorDenies(t *testing.T) {
+	d := &darwinPlatform{}
+	p := &profile.Profile{
+		Command: []string{"echo"},
+	}
+	sbpl, err := d.GenerateProfile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Must deny file-write* on ancestors to prevent directory-swap attacks.
+	wantAncestors := []string{"/private", "/private/etc", "/private/var", "/private/var/db", "/private/var/run", "/System", "/Library"}
+	for _, anc := range wantAncestors {
+		want := `(deny file-write* (subpath "` + anc + `"))`
+		if !strings.Contains(sbpl, want) {
+			t.Errorf("profile missing ancestor deny rule for %s (bypass prevention)", anc)
 		}
 	}
 }

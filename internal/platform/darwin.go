@@ -23,6 +23,8 @@ import (
 
 // darwinSensitivePaths lists paths that must never be granted sandbox access
 // on macOS. Any user-provided path that overlaps with these is rejected.
+// Uses /private/... for paths under /etc and /var because macOS resolves those
+// symlinks before sandbox checks.
 var darwinSensitivePaths = []string{
 	"/etc/shadow",
 	"/etc/passwd",
@@ -34,6 +36,8 @@ var darwinSensitivePaths = []string{
 	"/private/etc/master.passwd",
 	"/var/db/dslocal",
 	"/var/run/secrets",
+	"/private/var/db/dslocal",
+	"/private/var/run/secrets",
 	"/System/Library",
 	"/Library/Keychains",
 	"/Network",
@@ -59,6 +63,25 @@ func escapeSBPLPath(p string) string {
 	p = strings.ReplaceAll(p, `\`, `\\`)
 	p = strings.ReplaceAll(p, `"`, `\"`)
 	return p
+}
+
+// pathAncestors returns ancestor directories of p, excluding root.
+// Example: /private/etc/shadow -> [/private /private/etc]
+func pathAncestors(p string) []string {
+	p = filepath.Clean(p)
+	if p == "" || p == "/" || p == "." {
+		return nil
+	}
+	var ancestors []string
+	for {
+		dir := filepath.Dir(p)
+		if dir == p || dir == "/" {
+			break
+		}
+		ancestors = append(ancestors, dir)
+		p = dir
+	}
+	return ancestors
 }
 
 func (d *darwinPlatform) GenerateProfile(p *profile.Profile) (string, error) {
@@ -123,11 +146,27 @@ func (d *darwinPlatform) GenerateProfile(p *profile.Profile) (string, error) {
 	sb.WriteString("(allow file-read* (literal \"/private/tmp\"))\n")
 	sb.WriteString("(allow file-read* (literal \"/private/etc\"))\n\n")
 
-	// Always deny sensitive paths (defense in depth)
+	// Always deny sensitive paths (defense in depth).
+	// Deny file-read* and file-write* to block read, write, rename(2), and unlink(2).
 	sb.WriteString("; Deny sensitive paths\n")
 	for _, sp := range darwinSensitivePaths {
 		escaped := escapeSBPLPath(sp)
-		sb.WriteString(fmt.Sprintf("(deny file-read-data file-write-data (subpath \"%s\"))\n", escaped))
+		sb.WriteString(fmt.Sprintf("(deny file-read* file-write* (subpath \"%s\"))\n", escaped))
+	}
+
+	// Deny file-write* (rename, unlink) on ancestor directories to prevent
+	// directory-swap attacks: move denied dir to readable location, or rename
+	// parent, modify, rename back.
+	sb.WriteString("; Deny rename/unlink on ancestors of sensitive paths (bypass prevention)\n")
+	ancestorSet := make(map[string]bool)
+	for _, sp := range darwinSensitivePaths {
+		for _, anc := range pathAncestors(sp) {
+			ancestorSet[anc] = true
+		}
+	}
+	for anc := range ancestorSet {
+		escaped := escapeSBPLPath(anc)
+		sb.WriteString(fmt.Sprintf("(deny file-write* (subpath \"%s\"))\n", escaped))
 	}
 	sb.WriteString("\n")
 

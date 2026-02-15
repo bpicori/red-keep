@@ -6,7 +6,7 @@ VERSION := 0.1.0
 GO := go
 GOFLAGS :=
 
-.PHONY: all build run clean vet test fmt help
+.PHONY: all build run clean vet test fmt integration-test help
 
 all: build
 
@@ -30,6 +30,10 @@ vet:
 ## test: Run all tests
 test:
 	$(GO) test ./...
+
+## integration-test: Run integration tests (macOS)
+integration-test: build
+	bash tests/integration_macos.sh
 
 ## fmt: Format all Go source files
 fmt:
