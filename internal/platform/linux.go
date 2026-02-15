@@ -31,7 +31,7 @@ func (l *linuxPlatform) GenerateProfile(p *profile.Profile) (string, error) {
 	return "", nil
 }
 
-func (l *linuxPlatform) Exec(p *profile.Profile, onViolation ViolationHandler) (int, error) {
+func (l *linuxPlatform) Exec(p *profile.Profile) (int, error) {
 	// TODO: not yet implemented
 	return 0, nil
 }

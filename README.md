@@ -16,8 +16,12 @@ red-keep run --allow-read /home/dev/project -- ls -la
 # Run with read-write access and full network
 red-keep run --allow-rw /tmp/output --allow-net -- curl https://example.com -o /tmp/output/file
 
-# Preview the generated sandbox profile without executing
-red-keep run --show-profile --allow-read /home/dev/project -- echo test
+# Run with read-write access and full network and allow-domain example.com
+red-keep run --allow-rw /tmp/output --allow-net --allow-domain example.com -- curl https://example.com -o /tmp/output/file
+
+# Run with read-write access and full network and deny-domain example.com
+red-keep run --allow-rw /tmp/output --allow-net --deny-domain example.com -- curl https://example.com -o /tmp/output/file
+
 ```
 
 ## Commands
@@ -61,7 +65,7 @@ All paths must be absolute. Paths are resolved to their canonical form (symlinks
 
 - **Deny (default):** All outbound/inbound network access is blocked. Local Unix sockets are allowed for IPC.
 - **Allow:** Unrestricted network access (`--allow-net`).
-- **Filtered:** Domain-level control via a local forward proxy. When `--allow-domain` is used, only listed domains are reachable (allowlist). When `--deny-domain` is used, all domains are reachable except listed ones (denylist). If both are set, allowlist takes precedence.
+- **Filtered:** Domain-level control via a local forward proxy. When `--allow-domain` is used, only listed domains are reachable (allowlist). When `--deny-domain` is used, all domains are reachable except listed ones (denylist). The two flags are mutually exclusive and cannot be combined.
 
 #### Process and PTY
 
@@ -76,7 +80,6 @@ All paths must be absolute. Paths are resolved to their canonical form (symlinks
 |-------------------|--------------------------------------------------------------------|
 | `--dir <path>`    | Set the working directory for the sandboxed command                 |
 | `--show-profile`  | Print the generated sandbox profile to stdout and exit (dry run)   |
-| `--monitor`       | Stream sandbox violation events to stderr in real time             |
 
 ## Security model
 
@@ -157,34 +160,58 @@ red-keep run \
 # Interactive session with PTY
 red-keep run --allow-rw /home/dev/project --allow-pty -- bash
 
-# Monitor violations while running
-red-keep run --allow-read /home/dev/project --monitor -- python risky_script.py
-
 # Inspect the generated profile
 red-keep run --show-profile --allow-read /home/dev/project --allow-net -- echo test
 ```
+
+## Architecture
+
+```
+cmd/red-keep/          CLI entry point
+internal/
+  cli/                 Flag parsing & command orchestration
+  profile/             Platform-agnostic sandbox profile & validation
+  platform/            OS-specific implementations (darwin, linux)
+  proxy/               HTTP/HTTPS forward proxy for domain filtering
+tests/                 Integration tests (macOS)
+```
+
+The sandbox flow:
+
+1. **Parse & validate** — CLI flags are parsed into a `Profile` struct. Paths are resolved (symlinks evaluated), checked against sensitive-path lists, and validated for correctness.
+2. **Generate profile** — The platform layer translates the `Profile` into an OS-native policy (e.g. SBPL on macOS).
+3. **Proxy (filtered mode)** — When domain rules are active, a local HTTP/HTTPS forward proxy starts on a random localhost port. `HTTP_PROXY` / `HTTPS_PROXY` env vars are injected so the child process routes traffic through it.
+4. **Execute** — The command runs inside the sandbox with the generated policy.
 
 ## Platform implementation
 
 ### macOS
 
-Uses Apple's Seatbelt (SBPL profiles) via `sandbox-exec` or the `sandbox_init()` C API. Seatbelt is a kernel-level mandatory access control framework.
+Uses Apple's Seatbelt (SBPL profiles) via `sandbox-exec`. Seatbelt is a kernel-level mandatory access control framework that enforces file, network, process, and IPC restrictions. The generated profile:
+
+- Denies everything by default
+- Adds read access for system paths (OS libraries, binaries, shared caches, timezone data)
+- Adds write access for temp directories
+- Blocks `rename(2)` and `unlink(2)` on sensitive paths and their ancestors (bypass prevention)
+- Controls network access via Seatbelt rules or the filtering proxy
+- Restricts `process-exec` to system binaries unless `--allow-exec` is set
 
 ### Linux *(planned)*
 
 Will use a combination of:
-- **Landlock** - Filesystem access control (kernel 5.13+)
-- **seccomp-bpf** - System call filtering
-- **Network namespaces / iptables** - Network access control
+- **Landlock** — Filesystem access control (kernel 5.13+)
+- **seccomp-bpf** — System call filtering
+- **Network namespaces / iptables** — Network access control
 
 ## Development
 
 ```bash
-make build     # Compile to bin/red-keep
-make test      # Run all tests
-make vet       # Run go vet
-make fmt       # Format source
-make clean     # Remove build artifacts
+make build              # Compile to bin/red-keep
+make test               # Run unit tests
+make integration-test   # Run integration tests (macOS, builds first)
+make vet                # Run go vet
+make fmt                # Format source
+make clean              # Remove build artifacts
 ```
 
 ## License

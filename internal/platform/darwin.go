@@ -3,17 +3,14 @@
 package platform
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -242,8 +239,8 @@ func (d *darwinPlatform) GenerateProfile(p *profile.Profile) (string, error) {
 	return sb.String(), nil
 }
 
-func (d *darwinPlatform) Exec(p *profile.Profile, onViolation ViolationHandler) (int, error) {
-	// Start the domain-filtering proxy when allow/deny domains are configured.
+func (d *darwinPlatform) Exec(p *profile.Profile) (int, error) {
+	// Start the domain-filtering proxy when allow/deny domains are configured
 	var proxyAddr string
 	if len(p.AllowDomains) > 0 || len(p.DenyDomains) > 0 {
 		prx := proxy.New(p.AllowDomains, p.DenyDomains)
@@ -294,8 +291,6 @@ func (d *darwinPlatform) Exec(p *profile.Profile, onViolation ViolationHandler) 
 	}
 
 	// Route the sandboxed process's HTTP/HTTPS traffic through our filtering
-	// proxy so domain-based rules are enforced. We clear any pre-existing
-	// proxy env vars to prevent the child from bypassing the filter.
 	if proxyAddr != "" {
 		cmd.Env = proxyEnv(proxyAddr)
 	}
@@ -307,21 +302,6 @@ func (d *darwinPlatform) Exec(p *profile.Profile, onViolation ViolationHandler) 
 	}
 
 	childPID := cmd.Process.Pid
-	var wg sync.WaitGroup
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	if onViolation != nil {
-		wg.Add(1)
-		cmdName := ""
-		if len(p.Command) > 0 {
-			cmdName = p.Command[0]
-		}
-		go func() {
-			defer wg.Done()
-			d.monitorViolations(ctx, childPID, cmdName, onViolation)
-		}()
-	}
 
 	// Forward SIGINT, SIGTERM to child process group
 	sigCh := make(chan os.Signal, 1)
@@ -346,10 +326,6 @@ func (d *darwinPlatform) Exec(p *profile.Profile, onViolation ViolationHandler) 
 	}()
 
 	<-done
-	cancel()
-	if onViolation != nil {
-		wg.Wait()
-	}
 
 	if waitErr != nil {
 		if exitErr, ok := waitErr.(*exec.ExitError); ok {
@@ -362,9 +338,8 @@ func (d *darwinPlatform) Exec(p *profile.Profile, onViolation ViolationHandler) 
 	return 0, nil
 }
 
-// proxyEnv returns a copy of the current environment with proxy variables
-// set to route traffic through the filtering proxy at addr. Existing proxy
-// env vars are stripped to prevent the child process from bypassing the filter.
+// proxyEnv returns a copy of the current environment with proxy variables set
+// Every client have a convention to look at these variables and if set will forward the traffic through the proxy
 func proxyEnv(addr string) []string {
 	proxyURL := "http://" + addr
 
@@ -398,87 +373,4 @@ func proxyEnv(addr string) []string {
 		"NO_PROXY=",
 		"no_proxy=",
 	)
-}
-
-// violationLineRegex matches sandboxd log lines like:
-// "sandboxd(xxx): process(pid) deny file-read-data /path/to/file"
-// or "Violation: deny(1) file-read-data /path"
-var violationLineRegex = regexp.MustCompile(`(?i)(?:sandboxd|violation).*?(?:deny|violation).*?(\S+)\s+([^\s]+)(?:\s+(.+))?`)
-
-func (d *darwinPlatform) monitorViolations(ctx context.Context, pid int, cmdName string, onViolation ViolationHandler) {
-	// Use log stream to capture sandbox violations. Sandbox violations are reported
-	// by sandboxd with subsystem com.apple.sandbox.reporting. Filter by cmdName
-	// when possible to reduce noise from other processes.
-	args := []string{
-		"stream",
-		"--predicate", `subsystem == "com.apple.sandbox.reporting"`,
-		"--style", "syslog",
-	}
-	cmd := exec.CommandContext(ctx, "log", args...)
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return
-	}
-	if err := cmd.Start(); err != nil {
-		return
-	}
-	defer cmd.Wait()
-
-	scanner := bufio.NewScanner(stdout)
-	for scanner.Scan() {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-		}
-		line := scanner.Text()
-		if cmdName != "" && !strings.Contains(line, cmdName) {
-			continue
-		}
-		if !strings.Contains(strings.ToLower(line), "deny") && !strings.Contains(line, "violation") {
-			continue
-		}
-		evt := parseViolationLine(line)
-		if evt.Operation != "" {
-			onViolation(evt)
-		}
-	}
-}
-
-// parseViolationLine extracts ViolationEvent from a sandbox log line.
-func parseViolationLine(line string) ViolationEvent {
-	evt := ViolationEvent{Timestamp: time.Now(), Raw: line}
-
-	// Format: "process(12345) deny file-read-data /path" or "deny(1) file-read-data /path"
-	// Try to extract operation (e.g. file-read-data, network-outbound) and path
-	parts := strings.Fields(line)
-	for i, p := range parts {
-		if p == "deny" && i+1 < len(parts) {
-			evt.Operation = parts[i+1]
-			if i+2 < len(parts) {
-				evt.Path = parts[i+2]
-			}
-			break
-		}
-		if strings.HasPrefix(p, "deny(") && i+1 < len(parts) {
-			evt.Operation = parts[i+1]
-			if i+2 < len(parts) {
-				evt.Path = parts[i+2]
-			}
-			break
-		}
-	}
-
-	// Fallback: use regex
-	if evt.Operation == "" {
-		if m := violationLineRegex.FindStringSubmatch(line); len(m) >= 3 {
-			evt.Operation = m[1]
-			evt.Path = m[2]
-			if len(m) >= 4 {
-				evt.Path = m[2] + " " + m[3]
-			}
-		}
-	}
-
-	return evt
 }

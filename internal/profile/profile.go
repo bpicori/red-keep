@@ -34,7 +34,6 @@ type Profile struct {
 
 	WorkDir     string
 	ShowProfile bool
-	Monitor     bool
 
 	Command []string
 }

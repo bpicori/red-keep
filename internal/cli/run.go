@@ -33,7 +33,6 @@ type runFlags struct {
 	allowExec    bool
 	allowPTY     bool
 	showProfile  bool
-	monitor      bool
 	workDir      string
 	command      []string
 }
@@ -54,7 +53,6 @@ func parseRunFlags(args []string) (*runFlags, int) {
 	fs.BoolVar(&f.allowExec, "allow-exec", false, "Allow spawning child processes")
 	fs.BoolVar(&f.allowPTY, "allow-pty", false, "Allow pseudo-terminal allocation")
 	fs.BoolVar(&f.showProfile, "show-profile", false, "Print the generated sandbox profile and exit (do not run)")
-	fs.BoolVar(&f.monitor, "monitor", false, "Stream sandbox violation events to stderr")
 	fs.StringVar(&f.workDir, "dir", "", "Working directory for the sandboxed command")
 
 	fs.Usage = func() {
@@ -98,7 +96,6 @@ func buildProfile(f *runFlags) *profile.Profile {
 		AllowPTY:     f.allowPTY,
 		WorkDir:      f.workDir,
 		ShowProfile:  f.showProfile,
-		Monitor:      f.monitor,
 		Command:      f.command,
 	}
 }
@@ -136,16 +133,8 @@ func RunCmd(args []string) int {
 		return 0
 	}
 
-	// Set up an optional violation handler for --monitor.
-	var onViolation platform.ViolationHandler
-	if p.Monitor {
-		onViolation = func(evt platform.ViolationEvent) {
-			fmt.Fprintf(os.Stderr, "[violation] %s %s (%s)\n", evt.Operation, evt.Path, evt.Raw)
-		}
-	}
-
 	// Execute the command inside the sandbox.
-	exitCode, err = plat.Exec(p, onViolation)
+	exitCode, err = plat.Exec(p)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		return 1

@@ -3,26 +3,13 @@ package proxy
 import (
 	"context"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
-)
 
-// directTransport forwards HTTP requests without honouring system proxy
-// env vars (which would cause an infinite loop since we ARE the proxy).
-var directTransport = &http.Transport{
-	DialContext: (&net.Dialer{
-		Timeout:   30 * time.Second,
-		KeepAlive: 30 * time.Second,
-	}).DialContext,
-	MaxIdleConns:          100,
-	IdleConnTimeout:       90 * time.Second,
-	TLSHandshakeTimeout:   10 * time.Second,
-	ExpectContinueTimeout: 1 * time.Second,
-}
+	"github.com/elazarl/goproxy"
+)
 
 // BlockedHandler is called when the proxy blocks a request to a domain.
 // domain is the hostname that was denied.
@@ -34,9 +21,8 @@ type BlockedHandler func(domain string)
 //   - Allowlist: only connections to explicitly listed domains are permitted.
 //   - Denylist: connections to listed domains are blocked; everything else passes.
 //
-// HTTPS is handled via the CONNECT method (tunnelling); the proxy inspects
-// the target hostname but does NOT terminate TLS — the client negotiates
-// TLS end-to-end through the tunnel.
+// HTTPS is handled via the CONNECT method (tunnelling); the proxy does NOT
+// terminate TLS — the client negotiates TLS end-to-end through the tunnel.
 type FilteringProxy struct {
 	allowDomains []string
 	denyDomains  []string
@@ -68,8 +54,52 @@ func (p *FilteringProxy) Start() (string, error) {
 	}
 	p.listener = ln
 
+	gpx := goproxy.NewProxyHttpServer()
+
+	// Use a transport that does NOT honour system proxy env vars
+	// (which would cause an infinite loop since we ARE the proxy).
+	gpx.Tr = &http.Transport{
+		Proxy: nil, // direct connection, no upstream proxy
+		DialContext: (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		MaxIdleConns:          100,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	}
+
+	// Condition: returns true when the domain should be BLOCKED.
+	isBlocked := goproxy.ReqConditionFunc(func(req *http.Request, ctx *goproxy.ProxyCtx) bool {
+		host := hostOnly(req.URL.Host)
+		if host == "" {
+			host = hostOnly(req.Host)
+		}
+		return !p.DomainAllowed(host)
+	})
+
+	// Block plain HTTP requests to denied domains.
+	gpx.OnRequest(isBlocked).DoFunc(
+		func(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
+			host := hostOnly(req.URL.Host)
+			if host == "" {
+				host = hostOnly(req.Host)
+			}
+			p.notifyBlocked(host)
+			return nil, goproxy.NewResponse(req, goproxy.ContentTypeText, http.StatusForbidden,
+				fmt.Sprintf("red-keep: domain %q blocked by policy", host))
+		})
+
+	// Block CONNECT (HTTPS) tunnelling to denied domains.
+	gpx.OnRequest(isBlocked).HandleConnect(goproxy.FuncHttpsHandler(
+		func(host string, ctx *goproxy.ProxyCtx) (*goproxy.ConnectAction, string) {
+			p.notifyBlocked(hostOnly(host))
+			return goproxy.RejectConnect, host
+		}))
+
 	p.server = &http.Server{
-		Handler: http.HandlerFunc(p.handleRequest),
+		Handler: gpx,
 	}
 
 	go p.server.Serve(ln) //nolint:errcheck // returns ErrServerClosed on shutdown
@@ -90,111 +120,6 @@ func (p *FilteringProxy) Stop(ctx context.Context) error {
 		return nil
 	}
 	return p.server.Shutdown(ctx)
-}
-
-// ---------------------------------------------------------------------------
-// Request handling
-// ---------------------------------------------------------------------------
-
-func (p *FilteringProxy) handleRequest(w http.ResponseWriter, r *http.Request) {
-	if r.Method == http.MethodConnect {
-		p.handleConnect(w, r)
-	} else {
-		p.handleHTTP(w, r)
-	}
-}
-
-// handleConnect processes HTTPS CONNECT tunnelling requests.
-func (p *FilteringProxy) handleConnect(w http.ResponseWriter, r *http.Request) {
-	host := hostOnly(r.Host)
-
-	if !p.DomainAllowed(host) {
-		p.notifyBlocked(host)
-		http.Error(w, fmt.Sprintf("red-keep: domain %q blocked by policy", host), http.StatusForbidden)
-		return
-	}
-
-	targetConn, err := net.DialTimeout("tcp", r.Host, 10*time.Second)
-	if err != nil {
-		http.Error(w, "Bad Gateway", http.StatusBadGateway)
-		return
-	}
-
-	hijacker, ok := w.(http.Hijacker)
-	if !ok {
-		targetConn.Close()
-		http.Error(w, "Hijacking not supported", http.StatusInternalServerError)
-		return
-	}
-
-	clientConn, _, err := hijacker.Hijack()
-	if err != nil {
-		targetConn.Close()
-		return
-	}
-
-	if _, err := clientConn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n")); err != nil {
-		clientConn.Close()
-		targetConn.Close()
-		return
-	}
-
-	// Bidirectional tunnel — when one direction hits EOF the write side
-	// of the other connection is half-closed so the peer sees EOF too.
-	var wg sync.WaitGroup
-	wg.Add(2)
-
-	copyDir := func(dst, src net.Conn) {
-		defer wg.Done()
-		io.Copy(dst, src)
-		if tc, ok := dst.(*net.TCPConn); ok {
-			tc.CloseWrite()
-		}
-	}
-
-	go copyDir(targetConn, clientConn)
-	go copyDir(clientConn, targetConn)
-
-	wg.Wait()
-	clientConn.Close()
-	targetConn.Close()
-}
-
-// handleHTTP forwards plain HTTP requests (non-CONNECT).
-func (p *FilteringProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
-	host := hostOnly(r.URL.Host)
-	if host == "" {
-		host = hostOnly(r.Host)
-	}
-
-	if !p.DomainAllowed(host) {
-		p.notifyBlocked(host)
-		http.Error(w, fmt.Sprintf("red-keep: domain %q blocked by policy", host), http.StatusForbidden)
-		return
-	}
-
-	outReq := r.Clone(r.Context())
-	outReq.RequestURI = ""
-
-	// Strip hop-by-hop headers that must not be forwarded.
-	outReq.Header.Del("Proxy-Connection")
-	outReq.Header.Del("Proxy-Authenticate")
-	outReq.Header.Del("Proxy-Authorization")
-
-	resp, err := directTransport.RoundTrip(outReq)
-	if err != nil {
-		http.Error(w, "Bad Gateway", http.StatusBadGateway)
-		return
-	}
-	defer resp.Body.Close()
-
-	for k, vv := range resp.Header {
-		for _, v := range vv {
-			w.Header().Add(k, v)
-		}
-	}
-	w.WriteHeader(resp.StatusCode)
-	io.Copy(w, resp.Body)
 }
 
 // notifyBlocked calls the OnBlocked handler if one is configured.
