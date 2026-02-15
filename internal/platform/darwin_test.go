@@ -438,3 +438,85 @@ func TestGenerateProfile_PTY(t *testing.T) {
 		t.Error("profile missing PTY dev rule")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Domain filtering profile generation
+// ---------------------------------------------------------------------------
+
+func TestGenerateProfile_AllowDomains(t *testing.T) {
+	d := &darwinPlatform{}
+	p := &profile.Profile{
+		AllowDomains: []string{"example.com"},
+		Command:      []string{"echo"},
+	}
+	sbpl, err := d.GenerateProfile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Should allow outbound only to localhost (proxy).
+	if !strings.Contains(sbpl, `(allow network-outbound (remote ip "localhost:*"))`) {
+		t.Error("profile missing localhost-only network-outbound rule")
+	}
+
+	// Should NOT allow unrestricted network.
+	if strings.Contains(sbpl, "(allow network-outbound)\n") {
+		t.Error("profile should not allow unrestricted network-outbound with domain filtering")
+	}
+	if strings.Contains(sbpl, "(allow network-inbound)") {
+		t.Error("profile should not allow network-inbound with domain filtering")
+	}
+	if strings.Contains(sbpl, "(allow network-bind)") {
+		t.Error("profile should not allow network-bind with domain filtering")
+	}
+	if strings.Contains(sbpl, "(deny network*)") {
+		t.Error("profile should not deny all network with domain filtering")
+	}
+
+	// Should still allow SSL certs and resolver config.
+	if !strings.Contains(sbpl, `(allow file-read* (subpath "/private/etc/ssl"))`) {
+		t.Error("profile missing SSL certificate read rule")
+	}
+	if !strings.Contains(sbpl, `(allow file-read* (literal "/private/etc/resolv.conf"))`) {
+		t.Error("profile missing resolv.conf read rule")
+	}
+}
+
+func TestGenerateProfile_DenyDomains(t *testing.T) {
+	d := &darwinPlatform{}
+	p := &profile.Profile{
+		DenyDomains: []string{"evil.com", "*.malware.net"},
+		Command:     []string{"echo"},
+	}
+	sbpl, err := d.GenerateProfile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Should have localhost-only outbound (same as allowlist mode).
+	if !strings.Contains(sbpl, `(allow network-outbound (remote ip "localhost:*"))`) {
+		t.Error("profile missing localhost-only network-outbound rule")
+	}
+	if strings.Contains(sbpl, "(deny network*)") {
+		t.Error("profile should not deny all network with deny-domain filtering")
+	}
+}
+
+func TestGenerateProfile_DomainFilteringDoesNotAffectFullNet(t *testing.T) {
+	// AllowNet should still produce unrestricted network rules.
+	d := &darwinPlatform{}
+	p := &profile.Profile{
+		AllowNet: true,
+		Command:  []string{"echo"},
+	}
+	sbpl, err := d.GenerateProfile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(sbpl, "(allow network-outbound)\n") {
+		t.Error("AllowNet should produce unrestricted network-outbound")
+	}
+	if strings.Contains(sbpl, `remote ip "localhost:*"`) {
+		t.Error("AllowNet should not restrict to localhost")
+	}
+}

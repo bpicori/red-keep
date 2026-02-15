@@ -216,6 +216,73 @@ func TestValidate_DomainsWithoutNet(t *testing.T) {
 	}
 }
 
+func TestValidate_DomainWithScheme(t *testing.T) {
+	p := &Profile{
+		Command:      []string{"curl", "https://example.com"},
+		AllowDomains: []string{"https://example.com"},
+	}
+	err := p.Validate(testSensitivePaths)
+	if err == nil {
+		t.Fatal("expected error for domain with URL scheme")
+	}
+	if !strings.Contains(err.Error(), "not a URL") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestValidate_DomainWithPath(t *testing.T) {
+	p := &Profile{
+		Command:     []string{"curl", "https://example.com"},
+		DenyDomains: []string{"example.com/path"},
+	}
+	err := p.Validate(testSensitivePaths)
+	if err == nil {
+		t.Fatal("expected error for domain with path")
+	}
+	if !strings.Contains(err.Error(), "not a URL path") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestValidate_DomainEmpty(t *testing.T) {
+	p := &Profile{
+		Command:      []string{"curl", "https://example.com"},
+		AllowDomains: []string{""},
+	}
+	err := p.Validate(testSensitivePaths)
+	if err == nil {
+		t.Fatal("expected error for empty domain")
+	}
+	if !strings.Contains(err.Error(), "must not be empty") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestValidate_DomainWildcardValid(t *testing.T) {
+	p := &Profile{
+		Command:      []string{"curl", "https://example.com"},
+		AllowDomains: []string{"*.example.com"},
+	}
+	if err := p.Validate(testSensitivePaths); err != nil {
+		t.Fatalf("unexpected error for wildcard domain: %v", err)
+	}
+}
+
+func TestValidate_AllowAndDenyDomainsCombined(t *testing.T) {
+	p := &Profile{
+		Command:      []string{"curl", "https://example.com"},
+		AllowDomains: []string{"example.com"},
+		DenyDomains:  []string{"evil.com"},
+	}
+	err := p.Validate(testSensitivePaths)
+	if err == nil {
+		t.Fatal("expected error combining --allow-domain with --deny-domain")
+	}
+	if !strings.Contains(err.Error(), "cannot be combined") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestValidate_SymlinkResolution(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "target")

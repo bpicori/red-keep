@@ -8,8 +8,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"os/signal"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"strings"
@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/bpicori/red-keep/internal/profile"
+	"github.com/bpicori/red-keep/internal/proxy"
 )
 
 // darwinSensitivePaths lists paths that must never be granted sandbox access
@@ -178,13 +179,21 @@ func (d *darwinPlatform) GenerateProfile(p *profile.Profile) (string, error) {
 
 	// Network
 	sb.WriteString("; Network\n")
-	if p.AllowNet || len(p.AllowDomains) > 0 || len(p.DenyDomains) > 0 {
-		// SBPL does not support domain-based filtering (only * or localhost).
-		// When AllowDomains/DenyDomains are set, we allow full network as best-effort.
+	if p.AllowNet {
 		sb.WriteString("(allow network-outbound)\n")
 		sb.WriteString("(allow network-inbound)\n")
 		sb.WriteString("(allow network-bind)\n")
 		// TLS and DNS require reading system certificates and resolver config.
+		sb.WriteString("(allow file-read* (subpath \"/private/etc/ssl\"))\n")
+		sb.WriteString("(allow file-read* (literal \"/private/etc/resolv.conf\"))\n")
+	} else if len(p.AllowDomains) > 0 || len(p.DenyDomains) > 0 {
+		// Domain-based filtering is enforced via a local HTTP proxy.
+		// The sandbox restricts outbound to localhost where the proxy
+		// listens; the proxy (running outside the sandbox) resolves DNS
+		// and forwards only permitted domains.
+		sb.WriteString("; Domain filtering via local proxy (HTTP_PROXY/HTTPS_PROXY)\n")
+		sb.WriteString("(allow network-outbound (remote ip \"localhost:*\"))\n")
+		// TLS certificates needed for end-to-end HTTPS through CONNECT tunnels.
 		sb.WriteString("(allow file-read* (subpath \"/private/etc/ssl\"))\n")
 		sb.WriteString("(allow file-read* (literal \"/private/etc/resolv.conf\"))\n")
 	} else {
@@ -195,6 +204,25 @@ func (d *darwinPlatform) GenerateProfile(p *profile.Profile) (string, error) {
 }
 
 func (d *darwinPlatform) Exec(p *profile.Profile, onViolation ViolationHandler) (int, error) {
+	// Start the domain-filtering proxy when allow/deny domains are configured.
+	var proxyAddr string
+	if len(p.AllowDomains) > 0 || len(p.DenyDomains) > 0 {
+		prx := proxy.New(p.AllowDomains, p.DenyDomains)
+		prx.OnBlocked = func(domain string) {
+			fmt.Fprintf(os.Stderr, "[red-keep] blocked connection to %q (domain not allowed by policy)\n", domain)
+		}
+		addr, err := prx.Start()
+		if err != nil {
+			return -1, fmt.Errorf("start filtering proxy: %w", err)
+		}
+		proxyAddr = addr
+		defer func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			prx.Stop(ctx)
+		}()
+	}
+
 	sbpl, err := d.GenerateProfile(p)
 	if err != nil {
 		return -1, err
@@ -224,6 +252,13 @@ func (d *darwinPlatform) Exec(p *profile.Profile, onViolation ViolationHandler) 
 
 	if p.WorkDir != "" {
 		cmd.Dir = p.WorkDir
+	}
+
+	// Route the sandboxed process's HTTP/HTTPS traffic through our filtering
+	// proxy so domain-based rules are enforced. We clear any pre-existing
+	// proxy env vars to prevent the child from bypassing the filter.
+	if proxyAddr != "" {
+		cmd.Env = proxyEnv(proxyAddr)
 	}
 
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -286,6 +321,44 @@ func (d *darwinPlatform) Exec(p *profile.Profile, onViolation ViolationHandler) 
 		return -1, waitErr
 	}
 	return 0, nil
+}
+
+// proxyEnv returns a copy of the current environment with proxy variables
+// set to route traffic through the filtering proxy at addr. Existing proxy
+// env vars are stripped to prevent the child process from bypassing the filter.
+func proxyEnv(addr string) []string {
+	proxyURL := "http://" + addr
+
+	// Proxy-related env var names to replace (both cases for portability).
+	skip := map[string]bool{
+		"HTTP_PROXY":  true,
+		"http_proxy":  true,
+		"HTTPS_PROXY": true,
+		"https_proxy": true,
+		"NO_PROXY":    true,
+		"no_proxy":    true,
+		"ALL_PROXY":   true,
+		"all_proxy":   true,
+	}
+
+	environ := os.Environ()
+	env := make([]string, 0, len(environ)+6)
+	for _, e := range environ {
+		name, _, _ := strings.Cut(e, "=")
+		if skip[name] {
+			continue
+		}
+		env = append(env, e)
+	}
+
+	return append(env,
+		"HTTP_PROXY="+proxyURL,
+		"http_proxy="+proxyURL,
+		"HTTPS_PROXY="+proxyURL,
+		"https_proxy="+proxyURL,
+		"NO_PROXY=",
+		"no_proxy=",
+	)
 }
 
 // violationLineRegex matches sandboxd log lines like:

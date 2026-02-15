@@ -69,9 +69,26 @@ func (p *Profile) Validate(sensitivePaths []string) error {
 	p.WritePaths, errs = validatePaths(p.WritePaths, "write path", sensitivePaths, errs)
 	p.RWPaths, errs = validatePaths(p.RWPaths, "rw path", sensitivePaths, errs)
 
+	// Validate domain format (must be hostnames, not URLs).
+	for _, d := range p.AllowDomains {
+		if err := validateDomain(d); err != nil {
+			errs = append(errs, fmt.Errorf("--allow-domain %q: %w", d, err))
+		}
+	}
+	for _, d := range p.DenyDomains {
+		if err := validateDomain(d); err != nil {
+			errs = append(errs, fmt.Errorf("--deny-domain %q: %w", d, err))
+		}
+	}
+
 	// Domain flags are only valid when AllowNet is false (filtered mode).
 	if p.AllowNet && (len(p.AllowDomains) > 0 || len(p.DenyDomains) > 0) {
 		errs = append(errs, errors.New("--allow-net cannot be combined with --allow-domain or --deny-domain"))
+	}
+
+	// Allowlist and denylist are mutually exclusive to avoid ambiguous semantics.
+	if len(p.AllowDomains) > 0 && len(p.DenyDomains) > 0 {
+		errs = append(errs, errors.New("--allow-domain and --deny-domain cannot be combined"))
 	}
 
 	return errors.Join(errs...)
@@ -134,6 +151,25 @@ func checkSensitivePath(resolved string, sensitivePaths []string) error {
 		if pathOverlaps(resolved, sensitive) {
 			return fmt.Errorf("%w %q", ErrPathSensitive, sensitive)
 		}
+	}
+	return nil
+}
+
+// validateDomain checks that d is a bare hostname (with optional wildcard
+// prefix), not a URL or path. This catches mistakes like passing
+// "https://example.com" instead of "example.com".
+func validateDomain(d string) error {
+	if d == "" {
+		return errors.New("domain must not be empty")
+	}
+	if strings.Contains(d, "://") {
+		return errors.New("must be a domain name, not a URL (remove the scheme)")
+	}
+	if strings.Contains(d, "/") {
+		return errors.New("must be a domain name, not a URL path")
+	}
+	if strings.Contains(d, " ") {
+		return errors.New("domain must not contain spaces")
 	}
 	return nil
 }
