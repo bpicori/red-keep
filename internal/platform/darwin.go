@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"os/signal"
 	"regexp"
 	"runtime"
@@ -102,10 +103,24 @@ func (d *darwinPlatform) GenerateProfile(p *profile.Profile) (string, error) {
 	sb.WriteString("(allow file-read* (subpath \"/sbin\"))\n")
 	sb.WriteString("(allow file-read* (subpath \"/usr/share\"))\n")
 	sb.WriteString("(allow file-read* (subpath \"/private/var/db/dyld\"))\n")
-	sb.WriteString("(allow file-read* (literal \"/dev/null\"))\n")
+	sb.WriteString("(allow file-read* file-write* (literal \"/dev/null\"))\n")
 	sb.WriteString("(allow file-read* (literal \"/dev/urandom\"))\n")
 	sb.WriteString("(allow file-read* (literal \"/dev/dtracehelper\"))\n")
 	sb.WriteString("(allow file-map-executable (subpath \"/\"))\n\n")
+
+	// macOS firmlink/symlink traversal. /var, /tmp, /etc are symlinks to
+	// /private/var, /private/tmp, /private/etc. The sandbox checks paths
+	// AFTER kernel symlink resolution, so SBPL rules must use the resolved
+	// /private/... paths. These literal rules allow the kernel to follow
+	// the symlinks during path traversal without granting access to contents.
+	sb.WriteString("; macOS symlink traversal\n")
+	sb.WriteString("(allow file-read* (literal \"/var\"))\n")
+	sb.WriteString("(allow file-read* (literal \"/tmp\"))\n")
+	sb.WriteString("(allow file-read* (literal \"/etc\"))\n")
+	sb.WriteString("(allow file-read* (literal \"/private\"))\n")
+	sb.WriteString("(allow file-read* (literal \"/private/var\"))\n")
+	sb.WriteString("(allow file-read* (literal \"/private/tmp\"))\n")
+	sb.WriteString("(allow file-read* (literal \"/private/etc\"))\n\n")
 
 	// Always deny sensitive paths (defense in depth)
 	sb.WriteString("; Deny sensitive paths\n")
@@ -136,10 +151,14 @@ func (d *darwinPlatform) GenerateProfile(p *profile.Profile) (string, error) {
 		sb.WriteString(fmt.Sprintf("(allow file-read* file-write* (subpath \"%s\"))\n", escaped))
 	}
 
-	// TMPDIR for temporary files
+	// TMPDIR for temporary files. Resolve symlinks because macOS sandbox
+	// evaluates rules against resolved paths (e.g. /var -> /private/var).
 	sb.WriteString("; Temporary directory\n")
 	tmpDir := os.TempDir()
 	if tmpDir != "" {
+		if resolved, err := filepath.EvalSymlinks(tmpDir); err == nil {
+			tmpDir = resolved
+		}
 		escaped := escapeSBPLPath(tmpDir)
 		sb.WriteString(fmt.Sprintf("(allow file-read* file-write* (subpath \"%s\"))\n", escaped))
 	}
@@ -165,6 +184,9 @@ func (d *darwinPlatform) GenerateProfile(p *profile.Profile) (string, error) {
 		sb.WriteString("(allow network-outbound)\n")
 		sb.WriteString("(allow network-inbound)\n")
 		sb.WriteString("(allow network-bind)\n")
+		// TLS and DNS require reading system certificates and resolver config.
+		sb.WriteString("(allow file-read* (subpath \"/private/etc/ssl\"))\n")
+		sb.WriteString("(allow file-read* (literal \"/private/etc/resolv.conf\"))\n")
 	} else {
 		sb.WriteString("(deny network*)\n")
 	}
