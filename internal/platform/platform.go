@@ -31,4 +31,3 @@ type Platform interface {
 	// events are streamed through it. Returns the process exit code.
 	Exec(p *profile.Profile, onViolation ViolationHandler) (int, error)
 }
-
