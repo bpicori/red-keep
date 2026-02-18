@@ -155,6 +155,27 @@ test_read_allowed() {
   fi
 }
 
+test_profile_flag_yaml() {
+  local dir file profile
+  dir=$(mktemp -d)
+  register_cleanup "$dir"
+  file="$dir/hello.txt"
+  profile="$dir/profile.yaml"
+  echo "profile-ok" >"$file"
+  cat >"$profile" <<EOF
+read_paths:
+  - $dir
+allow_exec: true
+EOF
+
+  run_red_keep run --profile "$profile" -- /bin/cat "$file"
+  if [[ $RK_EXIT -eq 0 ]] && [[ "$RK_STDOUT" == *"profile-ok"* ]]; then
+    pass "test_profile_flag_yaml"
+  else
+    fail "test_profile_flag_yaml" "exit=$RK_EXIT stdout=$RK_STDOUT stderr=$RK_STDERR"
+  fi
+}
+
 test_read_denied() {
   local dir file
   dir=$(mktemp -d /var/tmp/red-keep-integ-XXXXXXXX)
@@ -222,6 +243,24 @@ test_fork_allowed() {
     pass "test_fork_allowed"
   else
     fail "test_fork_allowed" "exit=$RK_EXIT stdout=$RK_STDOUT stderr=$RK_STDERR"
+  fi
+}
+
+test_pty_denied() {
+  run_red_keep run -- /bin/sh -c "exec 3<>/dev/ptmx; echo pty-ok"
+  if [[ $RK_EXIT -ne 0 ]]; then
+    pass "test_pty_denied"
+  else
+    fail "test_pty_denied" "expected PTY allocation denial, exit=$RK_EXIT stdout=$RK_STDOUT stderr=$RK_STDERR"
+  fi
+}
+
+test_pty_allowed() {
+  run_red_keep run --allow-pty -- /bin/sh -c "exec 3<>/dev/ptmx; echo pty-ok"
+  if [[ $RK_EXIT -eq 0 ]] && [[ "$RK_STDOUT" == *"pty-ok"* ]]; then
+    pass "test_pty_allowed"
+  else
+    fail "test_pty_allowed" "expected PTY allocation success, exit=$RK_EXIT stdout=$RK_STDOUT stderr=$RK_STDERR"
   fi
 }
 
@@ -390,12 +429,15 @@ main() {
   test_basic_echo
   test_nonzero_exit
   test_read_allowed
+  test_profile_flag_yaml
   test_read_denied
   test_write_allowed
   test_write_denied
   test_sensitive_path_rejected
   test_fork_denied
   test_fork_allowed
+  test_pty_denied
+  test_pty_allowed
   test_workdir
   test_show_profile_default
   test_show_profile_allow_net

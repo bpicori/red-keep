@@ -8,6 +8,7 @@ import (
 
 	"github.com/bpicori/red-keep/internal/platform"
 	"github.com/bpicori/red-keep/internal/profile"
+	"gopkg.in/yaml.v3"
 )
 
 // multiFlag is a flag.Value that accumulates multiple string values.
@@ -22,6 +23,63 @@ func (m *multiFlag) Set(value string) error {
 	return nil
 }
 
+// boolFlag is a flag.Value that tracks whether it was explicitly set.
+type boolFlag struct {
+	value bool
+	set   bool
+}
+
+func (b *boolFlag) String() string {
+	if b == nil {
+		return "false"
+	}
+	return fmt.Sprintf("%t", b.value)
+}
+
+func (b *boolFlag) Set(value string) error {
+	parsed, err := parseBool(value)
+	if err != nil {
+		return err
+	}
+	b.value = parsed
+	b.set = true
+	return nil
+}
+
+func (*boolFlag) IsBoolFlag() bool {
+	return true
+}
+
+// stringFlag is a flag.Value that tracks whether it was explicitly set.
+type stringFlag struct {
+	value string
+	set   bool
+}
+
+func (s *stringFlag) String() string {
+	if s == nil {
+		return ""
+	}
+	return s.value
+}
+
+func (s *stringFlag) Set(value string) error {
+	s.value = value
+	s.set = true
+	return nil
+}
+
+func parseBool(value string) (bool, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "1", "t", "true", "y", "yes":
+		return true, nil
+	case "0", "f", "false", "n", "no":
+		return false, nil
+	default:
+		return false, fmt.Errorf("invalid boolean value %q", value)
+	}
+}
+
 // runFlags holds the raw values parsed from the "run" subcommand flags.
 type runFlags struct {
 	readPaths    multiFlag
@@ -29,12 +87,14 @@ type runFlags struct {
 	rwPaths      multiFlag
 	allowDomains multiFlag
 	denyDomains  multiFlag
-	allowNet     bool
-	allowExec    bool
-	allowPTY     bool
-	showProfile  bool
-	workDir      string
+	allowNet     boolFlag
+	allowExec    boolFlag
+	allowPTY     boolFlag
+	showProfile  boolFlag
+	workDir      stringFlag
+	profilePath  string
 	command      []string
+	usage        func()
 }
 
 // parseRunFlags parses CLI arguments for the "run" subcommand.
@@ -49,11 +109,12 @@ func parseRunFlags(args []string) (*runFlags, int) {
 	fs.Var(&f.allowDomains, "allow-domain", "Allow network access to domain (enables filtered mode, can repeat, supports *.example.com)")
 	fs.Var(&f.denyDomains, "deny-domain", "Deny network access to domain (enables filtered mode, can repeat, supports *.example.com)")
 
-	fs.BoolVar(&f.allowNet, "allow-net", false, "Allow all network access (overrides domain filters)")
-	fs.BoolVar(&f.allowExec, "allow-exec", false, "Allow spawning child processes")
-	fs.BoolVar(&f.allowPTY, "allow-pty", false, "Allow pseudo-terminal allocation")
-	fs.BoolVar(&f.showProfile, "show-profile", false, "Print the generated sandbox profile and exit (do not run)")
-	fs.StringVar(&f.workDir, "dir", "", "Working directory for the sandboxed command")
+	fs.Var(&f.allowNet, "allow-net", "Allow all network access (overrides domain filters)")
+	fs.Var(&f.allowExec, "allow-exec", "Allow spawning child processes")
+	fs.Var(&f.allowPTY, "allow-pty", "Allow pseudo-terminal allocation")
+	fs.Var(&f.showProfile, "show-profile", "Print the generated sandbox profile and exit (do not run)")
+	fs.Var(&f.workDir, "dir", "Working directory for the sandboxed command")
+	fs.StringVar(&f.profilePath, "profile", "", "Load run options from YAML file")
 
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: red-keep run [options] -- <command> [args...]\n\n")
@@ -66,7 +127,9 @@ func parseRunFlags(args []string) (*runFlags, int) {
 		fmt.Fprintf(os.Stderr, "  red-keep run --allow-domain example.com --allow-domain '*.github.com' -- curl https://example.com\n")
 		fmt.Fprintf(os.Stderr, "  red-keep run --deny-domain evil.com --deny-domain '*.malware.net' -- python agent.py\n")
 		fmt.Fprintf(os.Stderr, "  red-keep run --show-profile --allow-read /home/dev -- echo test\n")
+		fmt.Fprintf(os.Stderr, "  red-keep run --profile ./profile.yaml -- echo hello\n")
 	}
+	f.usage = fs.Usage
 
 	if err := fs.Parse(args); err != nil {
 		return nil, 2
@@ -74,29 +137,157 @@ func parseRunFlags(args []string) (*runFlags, int) {
 
 	// Everything after "--" (or remaining args) is the command.
 	f.command = fs.Args()
-	if len(f.command) == 0 {
-		fmt.Fprintf(os.Stderr, "Error: no command specified\n\n")
-		fs.Usage()
-		return nil, 2
-	}
-
 	return f, 0
 }
 
-// buildProfile constructs a Profile from the parsed run flags.
-func buildProfile(f *runFlags) *profile.Profile {
+// runConfigProfile defines sandbox run options that can be loaded from file
+// and then overridden by CLI flags.
+type runConfigProfile struct {
+	ReadPaths    []string `yaml:"read_paths"`
+	WritePaths   []string `yaml:"write_paths"`
+	RWPaths      []string `yaml:"rw_paths"`
+	AllowDomains []string `yaml:"allow_domains"`
+	DenyDomains  []string `yaml:"deny_domains"`
+	Command      []string `yaml:"command"`
+
+	AllowNet    *bool   `yaml:"allow_net"`
+	AllowExec   *bool   `yaml:"allow_exec"`
+	AllowPTY    *bool   `yaml:"allow_pty"`
+	ShowProfile *bool   `yaml:"show_profile"`
+	WorkDir     *string `yaml:"work_dir"`
+}
+
+func resolveRunConfig(f *runFlags) (*runConfigProfile, error) {
+	effective := &runConfigProfile{}
+
+	if f.profilePath != "" {
+		fromFile, err := loadRunConfigFile(f.profilePath)
+		if err != nil {
+			return nil, err
+		}
+		mergeRunConfigProfile(effective, fromFile)
+	}
+
+	mergeRunConfigProfile(effective, cliRunConfigOverrides(f))
+	return effective, nil
+}
+
+func loadRunConfigFile(path string) (*runConfigProfile, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read profile file %q: %w", path, err)
+	}
+
+	var fileCfg runConfigProfile
+	if err := yaml.Unmarshal(raw, &fileCfg); err != nil {
+		return nil, fmt.Errorf("parse profile file %q: %w", path, err)
+	}
+	return &fileCfg, nil
+}
+
+func cliRunConfigOverrides(f *runFlags) *runConfigProfile {
+	cfg := &runConfigProfile{
+		ReadPaths:    append([]string{}, f.readPaths...),
+		WritePaths:   append([]string{}, f.writePaths...),
+		RWPaths:      append([]string{}, f.rwPaths...),
+		AllowDomains: append([]string{}, f.allowDomains...),
+		DenyDomains:  append([]string{}, f.denyDomains...),
+		Command:      append([]string{}, f.command...),
+	}
+
+	if f.allowNet.set {
+		cfg.AllowNet = boolPtr(f.allowNet.value)
+	}
+	if f.allowExec.set {
+		cfg.AllowExec = boolPtr(f.allowExec.value)
+	}
+	if f.allowPTY.set {
+		cfg.AllowPTY = boolPtr(f.allowPTY.value)
+	}
+	if f.showProfile.set {
+		cfg.ShowProfile = boolPtr(f.showProfile.value)
+	}
+	if f.workDir.set {
+		cfg.WorkDir = stringPtr(f.workDir.value)
+	}
+
+	return cfg
+}
+
+func mergeRunConfigProfile(dst *runConfigProfile, src *runConfigProfile) {
+	if dst == nil || src == nil {
+		return
+	}
+
+	dst.ReadPaths = append(dst.ReadPaths, src.ReadPaths...)
+	dst.WritePaths = append(dst.WritePaths, src.WritePaths...)
+	dst.RWPaths = append(dst.RWPaths, src.RWPaths...)
+	dst.AllowDomains = append(dst.AllowDomains, src.AllowDomains...)
+	dst.DenyDomains = append(dst.DenyDomains, src.DenyDomains...)
+
+	if len(src.Command) > 0 {
+		dst.Command = append([]string{}, src.Command...)
+	}
+	if src.AllowNet != nil {
+		dst.AllowNet = boolPtr(*src.AllowNet)
+	}
+	if src.AllowExec != nil {
+		dst.AllowExec = boolPtr(*src.AllowExec)
+	}
+	if src.AllowPTY != nil {
+		dst.AllowPTY = boolPtr(*src.AllowPTY)
+	}
+	if src.ShowProfile != nil {
+		dst.ShowProfile = boolPtr(*src.ShowProfile)
+	}
+	if src.WorkDir != nil {
+		dst.WorkDir = stringPtr(*src.WorkDir)
+	}
+}
+
+func boolPtr(v bool) *bool {
+	return &v
+}
+
+func stringPtr(v string) *string {
+	return &v
+}
+
+// buildProfile constructs a Profile from resolved run options.
+func buildProfile(c *runConfigProfile) *profile.Profile {
+	allowNet := false
+	if c.AllowNet != nil {
+		allowNet = *c.AllowNet
+	}
+	allowExec := false
+	if c.AllowExec != nil {
+		allowExec = *c.AllowExec
+	}
+	allowPTY := false
+	if c.AllowPTY != nil {
+		allowPTY = *c.AllowPTY
+	}
+	showProfile := false
+	if c.ShowProfile != nil {
+		showProfile = *c.ShowProfile
+	}
+	workDir := ""
+	if c.WorkDir != nil {
+		workDir = *c.WorkDir
+	}
+
 	return &profile.Profile{
-		ReadPaths:    []string(f.readPaths),
-		WritePaths:   []string(f.writePaths),
-		RWPaths:      []string(f.rwPaths),
-		AllowNet:     f.allowNet,
-		AllowDomains: []string(f.allowDomains),
-		DenyDomains:  []string(f.denyDomains),
-		AllowExec:    f.allowExec,
-		AllowPTY:     f.allowPTY,
-		WorkDir:      f.workDir,
-		ShowProfile:  f.showProfile,
-		Command:      f.command,
+		ReadPaths:    append([]string{}, c.ReadPaths...),
+		WritePaths:   append([]string{}, c.WritePaths...),
+		RWPaths:      append([]string{}, c.RWPaths...),
+		AllowNet:     allowNet,
+		AllowDomains: append([]string{}, c.AllowDomains...),
+		DenyDomains:  append([]string{}, c.DenyDomains...),
+		AllowExec:    allowExec,
+		AllowPTY:     allowPTY,
+		WorkDir:      workDir,
+		ShowProfile:  showProfile,
+		Command:      append([]string{}, c.Command...),
 	}
 }
 
@@ -107,7 +298,20 @@ func RunCmd(args []string) int {
 		return exitCode
 	}
 
-	p := buildProfile(f)
+	effective, err := resolveRunConfig(f)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		return 2
+	}
+	if len(effective.Command) == 0 {
+		fmt.Fprintf(os.Stderr, "Error: no command specified (pass it after -- or in profile file)\n\n")
+		if f.usage != nil {
+			f.usage()
+		}
+		return 2
+	}
+
+	p := buildProfile(effective)
 
 	// Initialise the platform (darwin, linux, etc.).
 	plat, err := platform.New()
