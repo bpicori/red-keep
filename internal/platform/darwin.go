@@ -19,9 +19,6 @@ import (
 )
 
 // darwinSensitivePaths lists paths that must never be granted sandbox access
-// on macOS. Any user-provided path that overlaps with these is rejected.
-// Uses /private/... for paths under /etc and /var because macOS resolves those
-// symlinks before sandbox checks.
 var darwinSensitivePaths = []string{
 	"/etc/shadow",
 	"/etc/passwd",
