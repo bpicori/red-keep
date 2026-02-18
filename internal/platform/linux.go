@@ -21,6 +21,8 @@ import (
 
 	"github.com/bpicori/red-keep/internal/profile"
 	"github.com/bpicori/red-keep/internal/proxy"
+	"github.com/landlock-lsm/go-landlock/landlock"
+	landlocksys "github.com/landlock-lsm/go-landlock/landlock/syscall"
 	"golang.org/x/sys/unix"
 )
 
@@ -323,64 +325,55 @@ func setNoNewPrivs() error {
 
 // applyLandlock applies filesystem access rules using Landlock API.
 func applyLandlock(p *profile.Profile) error {
-	abi, err := landlockABIVersion()
+	rules := buildLandlockRules(p)
+	if len(rules) == 0 {
+		return fmt.Errorf("landlock rule set is empty")
+	}
+
+	cfg, err := selectLandlockConfig()
 	if err != nil {
 		return err
 	}
-	if abi < 1 {
-		return fmt.Errorf("unsupported Landlock ABI version: %d", abi)
-	}
 
-	handledFS := landlockHandledAccessFS(abi)
-	rulesetAttr := landlockRulesetAttr{HandledAccessFS: handledFS}
-
-	rulesetFD, err := landlockCreateRuleset(&rulesetAttr, 0)
-	if err != nil {
+	// Fail-closed policy: require supported Landlock ABI on this kernel.
+	if err := cfg.RestrictPaths(rules...); err != nil {
+		// Normalize kernel capability errors to the message expected by diagnostics/integration checks.
+		if strings.Contains(err.Error(), "missing kernel Landlock support") ||
+			strings.Contains(err.Error(), "landlock is not supported") {
+			return fmt.Errorf("landlock unavailable on this kernel (%w)", err)
+		}
 		return err
 	}
-	defer unix.Close(rulesetFD)
-
-	rules := buildLandlockRules(p, abi)
-	paths := make([]string, 0, len(rules))
-	for path := range rules {
-		paths = append(paths, path)
-	}
-	sort.Strings(paths)
-
-	for _, path := range paths {
-		allowedAccess := rules[path] & handledFS
-		if allowedAccess == 0 {
-			continue
-		}
-
-		pathFD, err := openLandlockPath(path)
-		if err != nil {
-			return fmt.Errorf("open rule path %q: %w", path, err)
-		}
-
-		pathAttr := landlockPathBeneathAttr{
-			AllowedAccess: allowedAccess,
-			ParentFD:      uint32(pathFD),
-		}
-		addErr := landlockAddRule(rulesetFD, landlockRulePathBeneath, &pathAttr, 0)
-		closeErr := unix.Close(pathFD)
-		if addErr != nil {
-			return fmt.Errorf("add landlock rule for %q: %w", path, addErr)
-		}
-		if closeErr != nil {
-			return fmt.Errorf("close landlock rule fd for %q: %w", path, closeErr)
-		}
-	}
-
-	return landlockRestrictSelf(rulesetFD, 0)
+	return nil
 }
 
-func buildLandlockRules(p *profile.Profile, abi int) map[string]uint64 {
-	readAccess := landlockReadAccessFS(abi)
-	writeAccess := landlockWriteAccessFS(abi)
+func selectLandlockConfig() (landlock.Config, error) {
+	abi, err := landlocksys.LandlockGetABIVersion()
+	if err != nil {
+		return landlock.Config{}, fmt.Errorf("landlock unavailable on this kernel (%w)", err)
+	}
 
-	rules := map[string]uint64{}
+	switch {
+	case abi >= 7:
+		return landlock.V7, nil
+	case abi == 6:
+		return landlock.V6, nil
+	case abi == 5:
+		return landlock.V5, nil
+	case abi == 4:
+		return landlock.V4, nil
+	case abi == 3:
+		return landlock.V3, nil
+	case abi == 2:
+		return landlock.V2, nil
+	case abi == 1:
+		return landlock.V1, nil
+	default:
+		return landlock.Config{}, fmt.Errorf("landlock unavailable on this kernel (unsupported ABI v%d)", abi)
+	}
+}
 
+func buildLandlockRules(p *profile.Profile) []landlock.Rule {
 	systemReadPaths := []string{
 		"/bin", "/sbin", "/usr/bin", "/usr/sbin", "/usr/lib", "/usr/lib64",
 		"/lib", "/lib64", "/etc/ld.so.cache", "/etc/ld.so.preload",
@@ -389,29 +382,50 @@ func buildLandlockRules(p *profile.Profile, abi int) map[string]uint64 {
 		"/dev/urandom",
 	}
 
-	for _, path := range systemReadPaths {
-		addLandlockRule(rules, path, readAccess)
+	rules := make([]landlock.Rule, 0, len(systemReadPaths)+len(p.ReadPaths)+len(p.WritePaths)+len(p.RWPaths)+8)
+
+	appendPathRule := func(path string, readOnly bool) {
+		target := nearestExistingPath(path)
+		info, err := os.Stat(target)
+		if err != nil {
+			return
+		}
+		if info.IsDir() {
+			if readOnly {
+				rules = append(rules, landlock.RODirs(target))
+			} else {
+				rules = append(rules, landlock.RWDirs(target))
+			}
+			return
+		}
+		if readOnly {
+			rules = append(rules, landlock.ROFiles(target))
+		} else {
+			rules = append(rules, landlock.RWFiles(target))
+		}
 	}
+
+	for _, path := range systemReadPaths {
+		appendPathRule(path, true)
+	}
+
 	// Many tools rely on writing to /dev/null (e.g. curl -o /dev/null).
-	addLandlockRule(rules, "/dev/null", readAccess|writeAccess)
+	appendPathRule("/dev/null", false)
 
 	if len(p.Command) > 0 {
 		if resolved, err := resolveCommandPath(p.Command[0]); err == nil {
-			addLandlockRule(rules, resolved, readAccess)
-			for _, anc := range pathAncestors(resolved) {
-				addLandlockRule(rules, anc, readAccess)
-			}
+			appendPathRule(resolved, true)
 		}
 	}
 
 	for _, path := range p.ReadPaths {
-		addLandlockRule(rules, path, readAccess)
+		appendPathRule(path, true)
 	}
 	for _, path := range p.WritePaths {
-		addLandlockRule(rules, path, writeAccess)
+		appendPathRule(path, false)
 	}
 	for _, path := range p.RWPaths {
-		addLandlockRule(rules, path, readAccess|writeAccess)
+		appendPathRule(path, false)
 	}
 
 	tmpDir := os.TempDir()
@@ -419,57 +433,19 @@ func buildLandlockRules(p *profile.Profile, abi int) map[string]uint64 {
 		if resolved, err := filepath.EvalSymlinks(tmpDir); err == nil {
 			tmpDir = resolved
 		}
-		addLandlockRule(rules, tmpDir, readAccess|writeAccess)
+		appendPathRule(tmpDir, false)
 	}
 
 	if p.WorkDir != "" {
-		addLandlockRule(rules, p.WorkDir, readAccess|writeAccess)
+		appendPathRule(p.WorkDir, false)
 	}
 
 	if p.AllowPTY {
-		addLandlockRule(rules, "/dev/pts", readAccess|writeAccess)
-		addLandlockRule(rules, "/dev/ptmx", readAccess|writeAccess)
+		appendPathRule("/dev/pts", false)
+		appendPathRule("/dev/ptmx", false)
 	}
 
 	return rules
-}
-
-func addLandlockRule(rules map[string]uint64, path string, access uint64) {
-	target, normalizedAccess := normalizeLandlockRule(path, access)
-	if normalizedAccess == 0 {
-		return
-	}
-	rules[target] |= normalizedAccess
-}
-
-func normalizeLandlockRule(path string, access uint64) (string, uint64) {
-	target := nearestExistingPath(path)
-
-	info, err := os.Stat(target)
-	if err != nil {
-		// If we cannot stat, keep current target and access; kernel will validate.
-		return target, access
-	}
-
-	if info.IsDir() {
-		return target, access
-	}
-
-	// Non-directory targets cannot carry directory-only rights.
-	// Also keep device/special files conservative: read/write only.
-	//
-	// Regular files may keep execute/truncate bits, which are useful for
-	// binaries and normal file operations.
-	if info.Mode().IsRegular() {
-		var regularFileMask uint64 = landlockAccessFSExecute |
-			landlockAccessFSReadFile |
-			landlockAccessFSWriteFile |
-			landlockAccessFSTruncate
-		return target, access & regularFileMask
-	}
-
-	var specialFileMask uint64 = landlockAccessFSReadFile | landlockAccessFSWriteFile
-	return target, access & specialFileMask
 }
 
 func nearestExistingPath(path string) string {
@@ -486,10 +462,6 @@ func nearestExistingPath(path string) string {
 		}
 		cleaned = filepath.Dir(cleaned)
 	}
-}
-
-func openLandlockPath(path string) (int, error) {
-	return unix.Open(path, unix.O_PATH|unix.O_CLOEXEC, 0)
 }
 
 func applySeccomp(p *profile.Profile) error {
@@ -573,141 +545,6 @@ func applySeccompDenyList(deny map[uint32]struct{}) error {
 		if errno == syscall.ENOSYS || errno == syscall.EINVAL {
 			return fmt.Errorf("seccomp unavailable on this kernel (%w)", errno)
 		}
-		return errno
-	}
-	return nil
-}
-
-func pathAncestors(path string) []string {
-	path = filepath.Clean(path)
-	if path == "" || path == "/" || path == "." {
-		return nil
-	}
-
-	var ancestors []string
-	for {
-		dir := filepath.Dir(path)
-		if dir == path || dir == "/" {
-			break
-		}
-		ancestors = append(ancestors, dir)
-		path = dir
-	}
-
-	return ancestors
-}
-
-const (
-	landlockCreateRulesetVersion = 1
-	landlockRulePathBeneath      = 1
-)
-
-type landlockRulesetAttr struct {
-	HandledAccessFS uint64
-}
-
-type landlockPathBeneathAttr struct {
-	AllowedAccess uint64
-	ParentFD      uint32
-	_             uint32
-}
-
-const (
-	landlockAccessFSExecute    = 1 << 0
-	landlockAccessFSWriteFile  = 1 << 1
-	landlockAccessFSReadFile   = 1 << 2
-	landlockAccessFSReadDir    = 1 << 3
-	landlockAccessFSRemoveDir  = 1 << 4
-	landlockAccessFSRemoveFile = 1 << 5
-	landlockAccessFSMakeChar   = 1 << 6
-	landlockAccessFSMakeDir    = 1 << 7
-	landlockAccessFSMakeReg    = 1 << 8
-	landlockAccessFSMakeSock   = 1 << 9
-	landlockAccessFSMakeFifo   = 1 << 10
-	landlockAccessFSMakeBlock  = 1 << 11
-	landlockAccessFSMakeSym    = 1 << 12
-	landlockAccessFSRefer      = 1 << 13
-	landlockAccessFSTruncate   = 1 << 14
-)
-
-func landlockReadAccessFS(_ int) uint64 {
-	return landlockAccessFSExecute | landlockAccessFSReadFile | landlockAccessFSReadDir
-}
-
-func landlockWriteAccessFS(abi int) uint64 {
-	var access uint64 = landlockAccessFSWriteFile |
-		landlockAccessFSRemoveDir |
-		landlockAccessFSRemoveFile |
-		landlockAccessFSMakeChar |
-		landlockAccessFSMakeDir |
-		landlockAccessFSMakeReg |
-		landlockAccessFSMakeSock |
-		landlockAccessFSMakeFifo |
-		landlockAccessFSMakeBlock |
-		landlockAccessFSMakeSym
-	if abi >= 2 {
-		access |= landlockAccessFSRefer
-	}
-	if abi >= 3 {
-		access |= landlockAccessFSTruncate
-	}
-	return access
-}
-
-func landlockHandledAccessFS(abi int) uint64 {
-	return landlockReadAccessFS(abi) | landlockWriteAccessFS(abi)
-}
-
-func landlockABIVersion() (int, error) {
-	fd, err := landlockCreateRuleset(nil, landlockCreateRulesetVersion)
-	if err != nil {
-		if errors.Is(err, syscall.ENOSYS) || errors.Is(err, syscall.EOPNOTSUPP) {
-			return 0, fmt.Errorf("landlock unavailable on this kernel (%w)", err)
-		}
-		return 0, err
-	}
-	return fd, nil
-}
-
-func landlockCreateRuleset(attr *landlockRulesetAttr, flags uint32) (int, error) {
-	var attrPtr uintptr
-	var size uintptr
-	if attr != nil {
-		attrPtr = uintptr(unsafe.Pointer(attr))
-		size = unsafe.Sizeof(*attr)
-	}
-
-	fd, _, errno := unix.Syscall(unix.SYS_LANDLOCK_CREATE_RULESET, attrPtr, size, uintptr(flags))
-	if errno != 0 {
-		return -1, errno
-	}
-	return int(fd), nil
-}
-
-func landlockAddRule(rulesetFD int, ruleType uint32, attr *landlockPathBeneathAttr, flags uint32) error {
-	_, _, errno := unix.Syscall6(
-		unix.SYS_LANDLOCK_ADD_RULE,
-		uintptr(rulesetFD),
-		uintptr(ruleType),
-		uintptr(unsafe.Pointer(attr)),
-		uintptr(flags),
-		0,
-		0,
-	)
-	if errno != 0 {
-		return errno
-	}
-	return nil
-}
-
-func landlockRestrictSelf(rulesetFD int, flags uint32) error {
-	_, _, errno := unix.Syscall(
-		unix.SYS_LANDLOCK_RESTRICT_SELF,
-		uintptr(rulesetFD),
-		uintptr(flags),
-		0,
-	)
-	if errno != 0 {
 		return errno
 	}
 	return nil
