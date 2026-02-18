@@ -13,14 +13,13 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
-	"sort"
 	"strings"
 	"syscall"
 	"time"
-	"unsafe"
 
 	"github.com/bpicori/red-keep/internal/profile"
 	"github.com/bpicori/red-keep/internal/proxy"
+	seccomp "github.com/elastic/go-seccomp-bpf"
 	"github.com/landlock-lsm/go-landlock/landlock"
 	landlocksys "github.com/landlock-lsm/go-landlock/landlock/syscall"
 	"golang.org/x/sys/unix"
@@ -465,87 +464,70 @@ func nearestExistingPath(path string) string {
 }
 
 func applySeccomp(p *profile.Profile) error {
-	deny := make(map[uint32]struct{})
+	denyNames := make(map[string]struct{})
 
 	if !p.AllowExec {
-		addSyscalls(deny, unix.SYS_CLONE, unix.SYS_FORK, unix.SYS_VFORK)
+		addSyscalls(denyNames, "clone", "fork", "vfork")
 	}
 
 	// Full deny-network mode blocks socket operations.
 	// Filtered mode currently relies on proxy environment wiring and therefore
 	// keeps socket syscalls available.
 	if !p.AllowNet && !hasDomainFilters(p) {
-		addSyscalls(deny,
-			unix.SYS_SOCKET, unix.SYS_SOCKETPAIR, unix.SYS_CONNECT, unix.SYS_BIND,
-			unix.SYS_LISTEN, unix.SYS_ACCEPT, unix.SYS_ACCEPT4, unix.SYS_SENDTO,
-			unix.SYS_SENDMSG, unix.SYS_SENDMMSG, unix.SYS_RECVFROM, unix.SYS_RECVMSG,
-			unix.SYS_RECVMMSG, unix.SYS_SHUTDOWN, unix.SYS_GETSOCKOPT,
-			unix.SYS_SETSOCKOPT, unix.SYS_GETSOCKNAME, unix.SYS_GETPEERNAME,
+		addSyscalls(denyNames,
+			"socket", "socketpair", "connect", "bind",
+			"listen", "accept", "accept4", "sendto",
+			"sendmsg", "sendmmsg", "recvfrom", "recvmsg",
+			"recvmmsg", "shutdown", "getsockopt",
+			"setsockopt", "getsockname", "getpeername",
 		)
 	}
 
-	return applySeccompDenyList(deny)
+	return applySeccompDenyList(denyNames)
 }
 
-func addSyscalls(m map[uint32]struct{}, syscalls ...uintptr) {
-	for _, nr := range syscalls {
-		m[uint32(nr)] = struct{}{}
+func addSyscalls(m map[string]struct{}, syscalls ...string) {
+	for _, name := range syscalls {
+		m[name] = struct{}{}
 	}
 }
 
-func applySeccompDenyList(deny map[uint32]struct{}) error {
-	const seccompDataNrOffset = 0
-	const seccompSetModeFilter = 1
-	const seccompFilterFlagTSync = 1
-
-	blocked := make([]uint32, 0, len(deny))
-	for nr := range deny {
-		blocked = append(blocked, nr)
-	}
-	sort.Slice(blocked, func(i, j int) bool { return blocked[i] < blocked[j] })
-
-	filters := make([]unix.SockFilter, 0, len(blocked)*2+2)
-	filters = append(filters, unix.SockFilter{
-		Code: unix.BPF_LD | unix.BPF_W | unix.BPF_ABS,
-		K:    seccompDataNrOffset,
-	})
-
-	for _, nr := range blocked {
-		filters = append(filters,
-			unix.SockFilter{
-				Code: unix.BPF_JMP | unix.BPF_JEQ | unix.BPF_K,
-				Jt:   0,
-				Jf:   1,
-				K:    nr,
-			},
-			unix.SockFilter{
-				Code: unix.BPF_RET | unix.BPF_K,
-				K:    uint32(unix.SECCOMP_RET_ERRNO) | uint32(syscall.EPERM),
-			},
-		)
+func applySeccompDenyList(deny map[string]struct{}) error {
+	policy := seccomp.Policy{
+		DefaultAction: seccomp.ActionAllow,
 	}
 
-	filters = append(filters, unix.SockFilter{
-		Code: unix.BPF_RET | unix.BPF_K,
-		K:    uint32(unix.SECCOMP_RET_ALLOW),
-	})
-
-	prog := unix.SockFprog{
-		Len:    uint16(len(filters)),
-		Filter: &filters[0],
-	}
-
-	_, _, errno := unix.Syscall(
-		unix.SYS_SECCOMP,
-		uintptr(seccompSetModeFilter),
-		uintptr(seccompFilterFlagTSync),
-		uintptr(unsafe.Pointer(&prog)),
-	)
-	if errno != 0 {
-		if errno == syscall.ENOSYS || errno == syscall.EINVAL {
-			return fmt.Errorf("seccomp unavailable on this kernel (%w)", errno)
+	if len(deny) == 0 {
+		// Library policies must include at least one syscall group.
+		// Keep seccomp installation active (fail-closed on unsupported kernels)
+		// while producing a no-op allow-all policy.
+		policy.Syscalls = append(policy.Syscalls, seccomp.SyscallGroup{
+			Names:  []string{"read"},
+			Action: seccomp.ActionAllow,
+		})
+	} else {
+		names := make([]string, 0, len(deny))
+		for name := range deny {
+			names = append(names, name)
 		}
-		return errno
+
+		policy.Syscalls = append(policy.Syscalls, seccomp.SyscallGroup{
+			Names:  names,
+			Action: seccomp.Action(uint32(seccomp.ActionErrno) | uint32(syscall.EPERM)),
+		})
+	}
+
+	filter := seccomp.Filter{
+		NoNewPrivs: false,
+		Flag:       seccomp.FilterFlagTSync,
+		Policy:     policy,
+	}
+
+	if err := seccomp.LoadFilter(filter); err != nil {
+		if errors.Is(err, syscall.ENOSYS) || errors.Is(err, syscall.EINVAL) {
+			return fmt.Errorf("seccomp unavailable on this kernel (%w)", err)
+		}
+		return err
 	}
 	return nil
 }

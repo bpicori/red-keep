@@ -3,6 +3,7 @@ module github.com/bpicori/red-keep
 go 1.25.7
 
 require (
+	github.com/elastic/go-seccomp-bpf v1.6.0
 	github.com/elazarl/goproxy v1.8.2
 	github.com/landlock-lsm/go-landlock v0.7.0
 	golang.org/x/sys v0.41.0
