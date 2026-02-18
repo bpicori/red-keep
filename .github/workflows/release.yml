@@ -1,0 +1,51 @@
+name: Release CLI
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  integration-linux:
+    name: Linux integration tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Run Linux integration tests
+        run: make integration-test-linux
+
+  release:
+    name: Build and publish release
+    needs: integration-linux
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build Linux binary
+        run: |
+          mkdir -p dist
+          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o dist/red-keep-linux-amd64 ./cmd/red-keep
+          chmod +x dist/red-keep-linux-amd64
+
+      - name: Create GitHub release and upload binary
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/red-keep-linux-amd64
