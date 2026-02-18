@@ -6,6 +6,7 @@ import (
 	"os"
 
 	"github.com/bpicori/red-keep/internal/cli"
+	"github.com/bpicori/red-keep/internal/platform"
 )
 
 const version = "0.1.0"
@@ -38,6 +39,13 @@ func main() {
 	switch args[0] {
 	case "run":
 		os.Exit(cli.RunCmd(args[1:]))
+	case "__redkeep_internal_linux_exec":
+		exitCode, err := platform.RunInternalLinuxExec(args[1:])
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		os.Exit(exitCode)
 	case "version":
 		fmt.Printf("red-keep %s\n", version)
 	case "help":
@@ -60,7 +68,7 @@ Commands:
   version   Print version information
   help      Show this help message
 
-Supported platforms: macOS (Seatbelt), Linux (Landlock + seccomp) [planned]
+Supported platforms: macOS (Seatbelt), Linux (Landlock + seccomp)
 
 Run "red-keep run --help" for details on the run command.
 `)

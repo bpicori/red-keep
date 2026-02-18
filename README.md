@@ -4,7 +4,7 @@
 
 A deny-by-default sandbox for AI agents. Lock down filesystem, network, and process access so autonomous tools can only touch what you explicitly allow.
 
-**Supported platforms:** macOS (Seatbelt), Linux (Landlock + seccomp) *(Linux support in progress)*
+**Supported platforms:** macOS (Seatbelt), Linux (Landlock + seccomp)
 
 ## Quick start
 
@@ -198,12 +198,14 @@ Uses Apple's Seatbelt (SBPL profiles) via `sandbox-exec`. Seatbelt is a kernel-l
 - Controls network access via Seatbelt rules or the filtering proxy
 - Restricts `process-exec` to system binaries unless `--allow-exec` is set
 
-### Linux *(planned)*
+### Linux
 
-Will use a combination of:
+Uses a combination of:
 - **Landlock** — Filesystem access control (kernel 5.13+)
 - **seccomp-bpf** — System call filtering
-- **Network namespaces / iptables** — Network access control
+- **Local filtering proxy** — Domain-level network filtering (`--allow-domain`, `--deny-domain`)
+
+Linux runs in fail-closed mode: if required kernel capabilities for Landlock/seccomp are unavailable, sandbox execution fails with a clear error.
 
 ## Development
 

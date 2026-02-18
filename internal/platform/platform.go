@@ -1,6 +1,8 @@
 package platform
 
 import (
+	"fmt"
+
 	"github.com/bpicori/red-keep/internal/profile"
 )
 
@@ -16,4 +18,13 @@ type Platform interface {
 
 	// Exec runs the command in the sandbox. Returns the process exit code.
 	Exec(p *profile.Profile) (int, error)
+}
+
+var runInternalLinuxExec = func(_ []string) (int, error) {
+	return 1, fmt.Errorf("internal linux exec is only supported on Linux")
+}
+
+// RunInternalLinuxExec executes the Linux-only internal trampoline.
+func RunInternalLinuxExec(args []string) (int, error) {
+	return runInternalLinuxExec(args)
 }
