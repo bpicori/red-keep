@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -18,7 +19,7 @@ import (
 	"github.com/bpicori/red-keep/internal/proxy"
 )
 
-// darwinSensitivePaths lists paths that must never be granted sandbox access
+// darwinSensitivePaths are always denied in the sandbox.
 var darwinSensitivePaths = []string{
 	"/etc/shadow",
 	"/etc/passwd",
@@ -52,194 +53,24 @@ func (d *darwinPlatform) SensitivePaths() []string {
 	return darwinSensitivePaths
 }
 
-// escapeSBPLPath escapes backslashes and double quotes for use in SBPL strings.
-func escapeSBPLPath(p string) string {
-	p = strings.ReplaceAll(p, `\`, `\\`)
-	p = strings.ReplaceAll(p, `"`, `\"`)
-	return p
-}
-
-// pathAncestors returns ancestor directories of p, excluding root.
-// Example: /private/etc/shadow -> [/private /private/etc]
-func pathAncestors(p string) []string {
-	p = filepath.Clean(p)
-	if p == "" || p == "/" || p == "." {
-		return nil
-	}
-	var ancestors []string
-	for {
-		dir := filepath.Dir(p)
-		if dir == p || dir == "/" {
-			break
-		}
-		ancestors = append(ancestors, dir)
-		p = dir
-	}
-	return ancestors
-}
-
 func (d *darwinPlatform) GenerateProfile(p *profile.Profile) (string, error) {
-	var sb strings.Builder
-
-	sb.WriteString("(version 1)\n")
-	sb.WriteString("(debug deny)\n")
-	sb.WriteString("(deny default)\n\n")
-
-	// Process operations.
-	// process-exec* is always allowed because sandbox-exec applies the profile
-	// before exec-ing the target command; denying it would prevent the initial
-	// command from starting. AllowExec controls process-fork, which gates
-	// whether the sandboxed process can spawn child processes.
-	sb.WriteString("; Process operations\n")
-	sb.WriteString("(allow process-exec*)\n")
-	if p.AllowExec {
-		sb.WriteString("(allow process-fork)\n")
-	} else {
-		sb.WriteString("(deny process-fork)\n")
-	}
-	sb.WriteString("(allow process-info* (target self))\n")
-	sb.WriteString("(deny process-info* (target others))\n\n")
-
-	// System operations required for basic execution
-	sb.WriteString("; System operations\n")
-	sb.WriteString("(allow sysctl-read)\n")
-	sb.WriteString("(allow mach-lookup)\n")
-	sb.WriteString("(allow ipc-posix-shm)\n")
-	sb.WriteString("(allow signal (target self))\n")
-	sb.WriteString("(allow system-socket)\n")
-	sb.WriteString("(allow system-fsctl)\n")
-	sb.WriteString("(allow system-info)\n\n")
-
-	// Standard system directories required for binary resolution and loading.
-	// execvp needs to read PATH directories, dyld needs libraries and cache.
-	sb.WriteString("; System paths for binary resolution and dyld\n")
-	sb.WriteString("(allow file-read* (literal \"/\"))\n")
-	sb.WriteString("(allow file-read* (subpath \"/usr/lib\"))\n")
-	sb.WriteString("(allow file-read* (subpath \"/usr/bin\"))\n")
-	sb.WriteString("(allow file-read* (subpath \"/bin\"))\n")
-	sb.WriteString("(allow file-read* (subpath \"/usr/sbin\"))\n")
-	sb.WriteString("(allow file-read* (subpath \"/sbin\"))\n")
-	sb.WriteString("(allow file-read* (subpath \"/usr/share\"))\n")
-	sb.WriteString("(allow file-read* (subpath \"/private/var/db/dyld\"))\n")
-	sb.WriteString("(allow file-read* file-write* (literal \"/dev/null\"))\n")
-	sb.WriteString("(allow file-read* (literal \"/dev/urandom\"))\n")
-	sb.WriteString("(allow file-read* (literal \"/dev/dtracehelper\"))\n")
-	sb.WriteString("(allow file-map-executable (subpath \"/\"))\n\n")
-
-	// macOS firmlink/symlink traversal. /var, /tmp, /etc are symlinks to
-	// /private/var, /private/tmp, /private/etc. The sandbox checks paths
-	// AFTER kernel symlink resolution, so SBPL rules must use the resolved
-	// /private/... paths. These literal rules allow the kernel to follow
-	// the symlinks during path traversal without granting access to contents.
-	sb.WriteString("; macOS symlink traversal\n")
-	sb.WriteString("(allow file-read* (literal \"/var\"))\n")
-	sb.WriteString("(allow file-read* (literal \"/tmp\"))\n")
-	sb.WriteString("(allow file-read* (literal \"/etc\"))\n")
-	sb.WriteString("(allow file-read* (literal \"/private\"))\n")
-	sb.WriteString("(allow file-read* (literal \"/private/var\"))\n")
-	sb.WriteString("(allow file-read* (literal \"/private/tmp\"))\n")
-	sb.WriteString("(allow file-read* (literal \"/private/etc\"))\n\n")
-
-	// Always deny sensitive paths (defense in depth).
-	// Deny file-read* and file-write* to block read, write, rename(2), and unlink(2).
-	sb.WriteString("; Deny sensitive paths\n")
-	for _, sp := range darwinSensitivePaths {
-		escaped := escapeSBPLPath(sp)
-		sb.WriteString(fmt.Sprintf("(deny file-read* file-write* (subpath \"%s\"))\n", escaped))
-	}
-
-	// Deny file-write* (rename, unlink) on ancestor directories to prevent
-	// directory-swap attacks: move denied dir to readable location, or rename
-	// parent, modify, rename back.
-	sb.WriteString("; Deny rename/unlink on ancestors of sensitive paths (bypass prevention)\n")
-	ancestorSet := make(map[string]bool)
-	for _, sp := range darwinSensitivePaths {
-		for _, anc := range pathAncestors(sp) {
-			ancestorSet[anc] = true
-		}
-	}
-	for anc := range ancestorSet {
-		escaped := escapeSBPLPath(anc)
-		sb.WriteString(fmt.Sprintf("(deny file-write* (subpath \"%s\"))\n", escaped))
-	}
-	sb.WriteString("\n")
-
-	// User-granted read paths
-	sb.WriteString("; Read paths\n")
-	for _, path := range p.ReadPaths {
-		escaped := escapeSBPLPath(path)
-		sb.WriteString(fmt.Sprintf("(allow file-read* (subpath \"%s\"))\n", escaped))
-	}
-
-	// User-granted write paths
-	sb.WriteString("; Write paths\n")
-	for _, path := range p.WritePaths {
-		escaped := escapeSBPLPath(path)
-		sb.WriteString(fmt.Sprintf("(allow file-write* (subpath \"%s\"))\n", escaped))
-	}
-
-	// User-granted read-write paths
-	sb.WriteString("; Read-write paths\n")
-	for _, path := range p.RWPaths {
-		escaped := escapeSBPLPath(path)
-		sb.WriteString(fmt.Sprintf("(allow file-read* file-write* (subpath \"%s\"))\n", escaped))
-	}
-
-	// TMPDIR for temporary files. Resolve symlinks because macOS sandbox
-	// evaluates rules against resolved paths (e.g. /var -> /private/var).
-	sb.WriteString("; Temporary directory\n")
-	tmpDir := os.TempDir()
-	if tmpDir != "" {
-		if resolved, err := filepath.EvalSymlinks(tmpDir); err == nil {
-			tmpDir = resolved
-		}
-		escaped := escapeSBPLPath(tmpDir)
-		sb.WriteString(fmt.Sprintf("(allow file-read* file-write* (subpath \"%s\"))\n", escaped))
-	}
-
-	// Working directory
-	if p.WorkDir != "" {
-		sb.WriteString("; Working directory\n")
-		escaped := escapeSBPLPath(p.WorkDir)
-		sb.WriteString(fmt.Sprintf("(allow file-read* file-write* (subpath \"%s\"))\n", escaped))
-	}
-
-	// PTY access
-	if p.AllowPTY {
-		sb.WriteString("; Pseudo-terminal access\n")
-		sb.WriteString("(allow file-read* file-write* (subpath \"/dev\"))\n")
-	}
-
-	// Network
-	sb.WriteString("; Network\n")
-	if p.AllowNet {
-		sb.WriteString("(allow network-outbound)\n")
-		sb.WriteString("(allow network-inbound)\n")
-		sb.WriteString("(allow network-bind)\n")
-		// TLS and DNS require reading system certificates and resolver config.
-		sb.WriteString("(allow file-read* (subpath \"/private/etc/ssl\"))\n")
-		sb.WriteString("(allow file-read* (literal \"/private/etc/resolv.conf\"))\n")
-	} else if len(p.AllowDomains) > 0 || len(p.DenyDomains) > 0 {
-		// Domain-based filtering is enforced via a local HTTP proxy.
-		// The sandbox restricts outbound to localhost where the proxy
-		// listens; the proxy (running outside the sandbox) resolves DNS
-		// and forwards only permitted domains.
-		sb.WriteString("; Domain filtering via local proxy (HTTP_PROXY/HTTPS_PROXY)\n")
-		sb.WriteString("(allow network-outbound (remote ip \"localhost:*\"))\n")
-		// TLS certificates needed for end-to-end HTTPS through CONNECT tunnels.
-		sb.WriteString("(allow file-read* (subpath \"/private/etc/ssl\"))\n")
-		sb.WriteString("(allow file-read* (literal \"/private/etc/resolv.conf\"))\n")
-	} else {
-		sb.WriteString("(deny network*)\n")
-	}
-
-	return sb.String(), nil
+	b := newDarwinProfileBuilder(p)
+	b.writeProfileHeader()
+	b.writeProcessRules()
+	b.writeSystemRules()
+	b.writeSensitivePathDenyRules()
+	b.writeUserPathRules()
+	b.writeTemporaryDirectoryRule()
+	b.writeWorkingDirectoryRule()
+	b.writePTYRules()
+	b.writeNetworkRules()
+	return b.sb.String(), nil
 }
 
 func (d *darwinPlatform) Exec(p *profile.Profile) (int, error) {
-	// Start the domain-filtering proxy when allow/deny domains are configured
+	// Start proxy only when domain filters are configured.
 	var proxyAddr string
-	if len(p.AllowDomains) > 0 || len(p.DenyDomains) > 0 {
+	if hasDomainFilters(p) {
 		prx := proxy.New(p.AllowDomains, p.DenyDomains)
 		prx.OnBlocked = func(domain string) {
 			fmt.Fprintf(os.Stderr, "[red-keep] blocked connection to %q (domain not allowed by policy)\n", domain)
@@ -276,7 +107,7 @@ func (d *darwinPlatform) Exec(p *profile.Profile) (int, error) {
 		return -1, fmt.Errorf("close profile: %w", err)
 	}
 
-	// Build sandbox-exec command: sandbox-exec -f <profile> -- <command> [args...]
+	// Run: sandbox-exec -f <profile> -- <command> [args...]
 	args := append([]string{"-f", profilePath, "--"}, p.Command...)
 	cmd := exec.Command("sandbox-exec", args...)
 	cmd.Stdin = os.Stdin
@@ -287,7 +118,7 @@ func (d *darwinPlatform) Exec(p *profile.Profile) (int, error) {
 		cmd.Dir = p.WorkDir
 	}
 
-	// Route the sandboxed process's HTTP/HTTPS traffic through our filtering
+	// Route HTTP/HTTPS through local filtering proxy.
 	if proxyAddr != "" {
 		cmd.Env = proxyEnv(proxyAddr)
 	}
@@ -300,7 +131,7 @@ func (d *darwinPlatform) Exec(p *profile.Profile) (int, error) {
 
 	childPID := cmd.Process.Pid
 
-	// Forward SIGINT, SIGTERM to child process group
+	// Forward SIGINT/SIGTERM to child process group.
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	done := make(chan struct{})
@@ -335,12 +166,12 @@ func (d *darwinPlatform) Exec(p *profile.Profile) (int, error) {
 	return 0, nil
 }
 
-// proxyEnv returns a copy of the current environment with proxy variables set
-// Every client have a convention to look at these variables and if set will forward the traffic through the proxy
+// proxyEnv returns environment with proxy vars set.
+// Existing proxy vars are removed first, then replaced.
 func proxyEnv(addr string) []string {
 	proxyURL := "http://" + addr
 
-	// Proxy-related env var names to replace (both cases for portability).
+	// Remove these proxy vars (upper/lower case).
 	skip := map[string]bool{
 		"HTTP_PROXY":  true,
 		"http_proxy":  true,
@@ -370,4 +201,214 @@ func proxyEnv(addr string) []string {
 		"NO_PROXY=",
 		"no_proxy=",
 	)
+}
+
+type darwinProfileBuilder struct {
+	sb strings.Builder
+	p  *profile.Profile
+}
+
+func newDarwinProfileBuilder(p *profile.Profile) *darwinProfileBuilder {
+	return &darwinProfileBuilder{p: p}
+}
+
+// writeProfileHeader writes SBPL header and defaults.
+func (b *darwinProfileBuilder) writeProfileHeader() {
+	// SBPL version.
+	b.sb.WriteString("(version 1)\n")
+	// Log debug messages for every denied operation
+	b.sb.WriteString("(debug deny)\n")
+	// Deny everything by default; later rules allow specific actions.
+	b.sb.WriteString("(deny default)\n\n")
+}
+
+func (b *darwinProfileBuilder) writeProcessRules() {
+	// Allow the main command to start.
+	// AllowExec only controls child process creation.
+	b.sb.WriteString("; Process operations\n")
+	b.sb.WriteString("(allow process-exec*)\n")
+	if b.p.AllowExec {
+		b.sb.WriteString("(allow process-fork)\n")
+	} else {
+		b.sb.WriteString("(deny process-fork)\n")
+	}
+	b.sb.WriteString("(allow process-info* (target self))\n")
+	b.sb.WriteString("(deny process-info* (target others))\n\n")
+}
+
+func (b *darwinProfileBuilder) writeSystemRules() {
+	// Minimal system operations needed to run.
+	b.sb.WriteString("; System operations\n")
+	b.sb.WriteString("(allow sysctl-read)\n")
+	b.sb.WriteString("(allow mach-lookup)\n")
+	b.sb.WriteString("(allow ipc-posix-shm)\n")
+	b.sb.WriteString("(allow signal (target self))\n")
+	b.sb.WriteString("(allow system-socket)\n")
+	b.sb.WriteString("(allow system-fsctl)\n")
+	b.sb.WriteString("(allow system-info)\n\n")
+
+	// Read standard system paths needed for binary lookup and dyld.
+	b.sb.WriteString("; System paths for binary resolution and dyld\n")
+	writeLiteralRule(&b.sb, "allow file-read*", "/")
+	writePathRules(&b.sb, "allow file-read*", []string{
+		"/usr/lib",
+		"/usr/bin",
+		"/bin",
+		"/usr/sbin",
+		"/sbin",
+		"/usr/share",
+		"/private/var/db/dyld",
+	})
+	writeLiteralRule(&b.sb, "allow file-read* file-write*", "/dev/null")
+	writeLiteralRule(&b.sb, "allow file-read*", "/dev/urandom")
+	writeLiteralRule(&b.sb, "allow file-read*", "/dev/dtracehelper")
+	writeSubpathRule(&b.sb, "allow file-map-executable", "/")
+	b.sb.WriteString("\n")
+
+	// Allow symlink traversal paths used on macOS.
+	// /var, /tmp, /etc resolve to /private/... at runtime.
+	b.sb.WriteString("; macOS symlink traversal\n")
+	for _, path := range []string{"/var", "/tmp", "/etc", "/private", "/private/var", "/private/tmp", "/private/etc"} {
+		writeLiteralRule(&b.sb, "allow file-read*", path)
+	}
+	b.sb.WriteString("\n")
+}
+
+func (b *darwinProfileBuilder) writeSensitivePathDenyRules() {
+	// Always deny sensitive paths.
+	// Deny read/write ops including rename and unlink.
+	b.sb.WriteString("; Deny sensitive paths\n")
+	writePathRules(&b.sb, "deny file-read* file-write*", darwinSensitivePaths)
+
+	// Deny rename/unlink on parent dirs to prevent bypass via directory moves.
+	b.sb.WriteString("; Deny rename/unlink on ancestors of sensitive paths (bypass prevention)\n")
+	ancestorSet := make(map[string]struct{})
+	for _, sp := range darwinSensitivePaths {
+		for _, anc := range pathAncestors(sp) {
+			ancestorSet[anc] = struct{}{}
+		}
+	}
+	ancestors := make([]string, 0, len(ancestorSet))
+	for anc := range ancestorSet {
+		ancestors = append(ancestors, anc)
+	}
+	sort.Strings(ancestors)
+	writePathRules(&b.sb, "deny file-write*", ancestors)
+	b.sb.WriteString("\n")
+}
+
+func (b *darwinProfileBuilder) writeUserPathRules() {
+	// User read paths.
+	b.sb.WriteString("; Read paths\n")
+	writePathRules(&b.sb, "allow file-read*", b.p.ReadPaths)
+
+	// User write paths.
+	b.sb.WriteString("; Write paths\n")
+	writePathRules(&b.sb, "allow file-write*", b.p.WritePaths)
+
+	// User read-write paths.
+	b.sb.WriteString("; Read-write paths\n")
+	writePathRules(&b.sb, "allow file-read* file-write*", b.p.RWPaths)
+}
+
+func (b *darwinProfileBuilder) writeTemporaryDirectoryRule() {
+	// Allow TMPDIR for temp files.
+	// Resolve symlinks because sandbox rules use resolved paths.
+	b.sb.WriteString("; Temporary directory\n")
+	tmpDir := os.TempDir()
+	if tmpDir == "" {
+		return
+	}
+	if resolved, err := filepath.EvalSymlinks(tmpDir); err == nil {
+		tmpDir = resolved
+	}
+	writeSubpathRule(&b.sb, "allow file-read* file-write*", tmpDir)
+}
+
+func (b *darwinProfileBuilder) writeWorkingDirectoryRule() {
+	// Allow working directory.
+	if b.p.WorkDir == "" {
+		return
+	}
+	b.sb.WriteString("; Working directory\n")
+	writeSubpathRule(&b.sb, "allow file-read* file-write*", b.p.WorkDir)
+}
+
+func (b *darwinProfileBuilder) writePTYRules() {
+	// Optional PTY access.
+	if !b.p.AllowPTY {
+		return
+	}
+	b.sb.WriteString("; Pseudo-terminal access\n")
+	writeSubpathRule(&b.sb, "allow file-read* file-write*", "/dev")
+}
+
+func (b *darwinProfileBuilder) writeNetworkRules() {
+	// Network rules.
+	b.sb.WriteString("; Network\n")
+	if b.p.AllowNet {
+		b.sb.WriteString("(allow network-outbound)\n")
+		b.sb.WriteString("(allow network-inbound)\n")
+		b.sb.WriteString("(allow network-bind)\n")
+		// Allow TLS certs and resolver config reads.
+		writeSubpathRule(&b.sb, "allow file-read*", "/private/etc/ssl")
+		writeLiteralRule(&b.sb, "allow file-read*", "/private/etc/resolv.conf")
+		return
+	}
+	if hasDomainFilters(b.p) {
+		// Domain filtering is done by a local proxy.
+		// Sandbox only allows outbound traffic to localhost.
+		b.sb.WriteString("; Domain filtering via local proxy (HTTP_PROXY/HTTPS_PROXY)\n")
+		b.sb.WriteString("(allow network-outbound (remote ip \"localhost:*\"))\n")
+		// Allow TLS cert and resolver config reads for HTTPS.
+		writeSubpathRule(&b.sb, "allow file-read*", "/private/etc/ssl")
+		writeLiteralRule(&b.sb, "allow file-read*", "/private/etc/resolv.conf")
+		return
+	}
+	// Else, deny all network access.
+	b.sb.WriteString("(deny network*)\n")
+}
+
+func hasDomainFilters(p *profile.Profile) bool {
+	return len(p.AllowDomains) > 0 || len(p.DenyDomains) > 0
+}
+
+func writeSubpathRule(sb *strings.Builder, action, path string) {
+	sb.WriteString(fmt.Sprintf("(%s (subpath \"%s\"))\n", action, escapeSBPLPath(path)))
+}
+
+func writePathRules(sb *strings.Builder, action string, paths []string) {
+	for _, path := range paths {
+		writeSubpathRule(sb, action, path)
+	}
+}
+
+func writeLiteralRule(sb *strings.Builder, action, path string) {
+	sb.WriteString(fmt.Sprintf("(%s (literal \"%s\"))\n", action, escapeSBPLPath(path)))
+}
+
+// escapeSBPLPath escapes backslashes and double quotes for use in SBPL strings.
+func escapeSBPLPath(p string) string {
+	p = strings.ReplaceAll(p, `\`, `\\`)
+	p = strings.ReplaceAll(p, `"`, `\"`)
+	return p
+}
+
+// pathAncestors returns ancestor directories of p, excluding root.
+// Example: /private/etc/shadow -> [/private /private/etc]
+func pathAncestors(p string) []string {
+	p = filepath.Clean(p)
+	if p == "" || p == "/" || p == "." {
+		return nil
+	}
+	var ancestors []string
+	for {
+		dir := filepath.Dir(p)
+		if dir == p || dir == "/" {
+			break
+		}
+		ancestors = append(ancestors, dir)
+		p = dir
+	}
+	return ancestors
 }

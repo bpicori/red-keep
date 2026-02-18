@@ -1,0 +1,71 @@
+---
+description: Generic Go coding standards for structure, design, and docs
+alwaysApply: true
+---
+
+# Golang Coding Standards
+
+## Core Design Principles
+
+- Prioritize readability, simplicity, and maintainability.
+- Design for change: isolate business logic and minimize framework lock-in.
+- Emphasize clear boundaries and dependency inversion.
+
+## Project Layout and Boundaries
+
+- Use a consistent project layout:
+  - `cmd/`: application entrypoints
+  - `internal/`: core application logic (not exposed externally)
+  - `pkg/`: shared utilities and packages
+  - `api/`: gRPC/REST transport definitions and handlers
+  - `configs/`: configuration schemas and loading
+  - `test/`: test utilities, mocks, and integration tests
+- Group code by feature when it improves clarity and cohesion.
+- Keep domain logic independent from framework, transport, and persistence types.
+- Validate and normalize input at system boundaries (transport, CLI, queue consumers).
+
+## Function and File Organization
+
+- Write short, focused functions with a single responsibility.
+- Keep functions small enough that intent is clear without extra explanation.
+- Order functions like a newspaper: place public and important methods first, helper details lower in the file.
+- Document public functions with Go-style doc comments that start with the function name.
+- Keep comments minimal; prefer self-explanatory code and comment only non-obvious intent.
+
+## Dependencies, State, and Context
+
+- Avoid global mutable state; prefer explicit dependency injection via constructors, parameters, and struct fields.
+- Define small interfaces at consumption boundaries; prefer concrete types internally.
+- Accept and propagate `context.Context` for operations that can block, cancel, or time out.
+- Do not store `context.Context` in structs; pass it per call.
+
+## Functional Style (Go-Friendly)
+
+- Prefer pure functions for business rules (same input -> same output, no hidden side effects).
+- Use functional core / imperative shell: keep side effects at boundaries and transformations in the core.
+- Favor immutable data flow; avoid mutating inputs unless in-place mutation is explicit in the contract.
+- Compose behavior from small functions; use higher-order functions only when they improve clarity.
+- Keep side effects explicit in names and signatures.
+- Stay idiomatic Go: clarity over clever abstractions.
+
+## Error Handling and Concurrency
+
+- Return wrapped errors with actionable context (for example, `%w`); never swallow errors silently.
+- Use sentinel/typed errors only when callers need stable branching behavior.
+- Ensure goroutines have clear lifecycle ownership and cancellation paths.
+- Protect shared mutable state with proper synchronization and run race detection in CI where possible.
+
+## Testing
+
+- Prefer table-driven tests for behavior with multiple scenarios.
+- Keep tests deterministic and isolated from external side effects by default.
+- Add integration tests for critical paths and effectful boundary interactions.
+
+## Examples
+
+```go
+// CreateUser creates a new user in storage.
+func (s *Service) CreateUser(ctx context.Context, in CreateUserInput) (User, error) {
+    // ...
+}
+```

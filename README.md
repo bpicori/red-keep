@@ -1,6 +1,8 @@
 # red-keep
 
-A deny-by-default sandbox for AI agents. Restricts filesystem, network, and process access so autonomous tools can only touch what you explicitly allow.
+![Red Keep project banner](assets/red-keep-image.png)
+
+A deny-by-default sandbox for AI agents. Lock down filesystem, network, and process access so autonomous tools can only touch what you explicitly allow.
 
 **Supported platforms:** macOS (Seatbelt), Linux (Landlock + seccomp) *(Linux support in progress)*
 
