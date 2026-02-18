@@ -39,13 +39,20 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Build Linux binary
+      - name: Build release binaries
         run: |
           mkdir -p dist
           GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o dist/red-keep-linux-amd64 ./cmd/red-keep
           chmod +x dist/red-keep-linux-amd64
+          GOOS=darwin GOARCH=amd64 CGO_ENABLED=0 go build -o dist/red-keep-darwin-amd64 ./cmd/red-keep
+          chmod +x dist/red-keep-darwin-amd64
+          GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -o dist/red-keep-darwin-arm64 ./cmd/red-keep
+          chmod +x dist/red-keep-darwin-arm64
 
       - name: Create GitHub release and upload binary
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/red-keep-linux-amd64
+          files: |
+            dist/red-keep-linux-amd64
+            dist/red-keep-darwin-amd64
+            dist/red-keep-darwin-arm64
