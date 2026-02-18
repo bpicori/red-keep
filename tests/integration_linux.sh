@@ -252,6 +252,29 @@ test_domain_allow_filter() {
   fi
 }
 
+test_domain_allow_blocks_unlisted() {
+  run_red_keep run --allow-exec --allow-domain example.com -- /usr/bin/curl -s --max-time 3 -o /dev/null -w "%{http_code}" https://httpbin.org/get
+  # Curl may exit 0 but return 403, or exit non-zero. Either indicates blocking.
+  local code
+  code=$(echo "$RK_STDOUT" | tr -d '[:space:]')
+  if [[ $RK_EXIT -ne 0 ]] || [[ "$code" == "000" ]] || [[ "$code" == "403" ]]; then
+    pass "test_domain_allow_blocks_unlisted"
+  else
+    fail "test_domain_allow_blocks_unlisted" "expected block, exit=$RK_EXIT http_code=$code"
+  fi
+}
+
+test_domain_deny_blocks_listed() {
+  run_red_keep run --allow-exec --deny-domain example.com -- /usr/bin/curl -s --max-time 3 -o /dev/null -w "%{http_code}" https://example.com
+  local code
+  code=$(echo "$RK_STDOUT" | tr -d '[:space:]')
+  if [[ $RK_EXIT -ne 0 ]] || [[ "$code" == "000" ]] || [[ "$code" == "403" ]]; then
+    pass "test_domain_deny_blocks_listed"
+  else
+    fail "test_domain_deny_blocks_listed" "expected block, exit=$RK_EXIT http_code=$code"
+  fi
+}
+
 test_workdir() {
   local dir
   dir=$(mktemp -d)
@@ -387,9 +410,13 @@ main() {
   if [[ "$SKIP_NETWORK" == true ]]; then
     skip "test_network_allowed" "network tests skipped (--skip-network or no curl)"
     skip "test_domain_allow_filter" "network tests skipped"
+    skip "test_domain_allow_blocks_unlisted" "network tests skipped"
+    skip "test_domain_deny_blocks_listed" "network tests skipped"
   else
     test_network_allowed
     test_domain_allow_filter
+    test_domain_allow_blocks_unlisted
+    test_domain_deny_blocks_listed
   fi
 
   summary

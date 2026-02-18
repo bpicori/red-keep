@@ -1,6 +1,6 @@
 # red-keep
 
-![Red Keep project banner](assets/red-keep-image.png)
+![Red Keep project banner](red-keep-image.png)
 
 A deny-by-default sandbox for AI agents. Lock down filesystem, network, and process access so autonomous tools can only touch what you explicitly allow.
 

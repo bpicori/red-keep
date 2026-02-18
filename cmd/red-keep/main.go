@@ -40,7 +40,12 @@ func main() {
 	case "run":
 		os.Exit(cli.RunCmd(args[1:]))
 	case "__redkeep_internal_linux_exec":
-		exitCode, err := platform.RunInternalLinuxExec(args[1:])
+		plat, err := platform.New()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		exitCode, err := plat.RunInternalSandboxExec(args[1:])
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)

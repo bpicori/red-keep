@@ -166,6 +166,10 @@ func (d *darwinPlatform) Exec(p *profile.Profile) (int, error) {
 	return 0, nil
 }
 
+func (d *darwinPlatform) RunInternalSandboxExec(_ []string) (int, error) {
+	return 0, nil
+}
+
 // proxyEnv returns environment with proxy vars set.
 // Existing proxy vars are removed first, then replaced.
 func proxyEnv(addr string) []string {

@@ -1,10 +1,6 @@
 package platform
 
-import (
-	"fmt"
-
-	"github.com/bpicori/red-keep/internal/profile"
-)
+import "github.com/bpicori/red-keep/internal/profile"
 
 // Platform abstracts OS-specific sandbox behaviour.
 type Platform interface {
@@ -18,13 +14,9 @@ type Platform interface {
 
 	// Exec runs the command in the sandbox. Returns the process exit code.
 	Exec(p *profile.Profile) (int, error)
-}
 
-var runInternalLinuxExec = func(_ []string) (int, error) {
-	return 1, fmt.Errorf("internal linux exec is only supported on Linux")
-}
-
-// RunInternalLinuxExec executes the Linux-only internal trampoline.
-func RunInternalLinuxExec(args []string) (int, error) {
-	return runInternalLinuxExec(args)
+	// RunInternalSandboxExec executes the internal sandbox entrypoint.
+	// On Linux this applies kernel sandboxing before exec, and on
+	// non-Linux platforms it is a no-op.
+	RunInternalSandboxExec(args []string) (int, error)
 }

@@ -37,11 +37,7 @@ var linuxSensitivePaths = []string{
 
 type linuxPlatform struct{}
 
-const internalLinuxPayloadEnv = "RED_KEEP_INTERNAL_LINUX_PAYLOAD"
-
-func init() {
-	runInternalLinuxExec = runInternalLinuxExecLinux
-}
+const InternalLinuxPayloadEnv = "RED_KEEP_INTERNAL_LINUX_PAYLOAD"
 
 // New returns the Platform implementation for Linux.
 func New() (Platform, error) {
@@ -147,7 +143,7 @@ func (l *linuxPlatform) Exec(p *profile.Profile) (int, error) {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Env = append(os.Environ(), internalLinuxPayloadEnv+"="+encodedPayload)
+	cmd.Env = append(os.Environ(), InternalLinuxPayloadEnv+"="+encodedPayload)
 	if proxyAddr != "" {
 		cmd.Env = proxyEnvWithBase(cmd.Env, proxyAddr)
 	}
@@ -192,6 +188,48 @@ func (l *linuxPlatform) Exec(p *profile.Profile) (int, error) {
 		return -1, waitErr
 	}
 
+	return 0, nil
+}
+
+// RunInternalSandboxExec applies Linux sandboxing and execs the target
+// command. It is intentionally reachable only through the internal trampoline.
+func (l *linuxPlatform) RunInternalSandboxExec(_ []string) (int, error) {
+	payload, err := decodeLinuxExecPayload(os.Getenv(InternalLinuxPayloadEnv))
+	if err != nil {
+		return 1, err
+	}
+
+	p := &payload.Profile
+	if len(p.Command) == 0 {
+		return 1, fmt.Errorf("internal linux payload has empty command")
+	}
+
+	if err := setNoNewPrivs(); err != nil {
+		return 1, fmt.Errorf("set no_new_privs: %w", err)
+	}
+
+	if err := applyLandlock(p); err != nil {
+		return 1, fmt.Errorf("apply landlock: %w", err)
+	}
+
+	if err := applySeccomp(p); err != nil {
+		return 1, fmt.Errorf("apply seccomp: %w", err)
+	}
+
+	if p.WorkDir != "" {
+		if err := os.Chdir(p.WorkDir); err != nil {
+			return 1, fmt.Errorf("chdir %q: %w", p.WorkDir, err)
+		}
+	}
+
+	cmdPath, err := resolveCommandPath(p.Command[0])
+	if err != nil {
+		return 1, fmt.Errorf("resolve command %q: %w", p.Command[0], err)
+	}
+
+	if err := syscall.Exec(cmdPath, p.Command, os.Environ()); err != nil {
+		return 1, fmt.Errorf("exec %q: %w", cmdPath, err)
+	}
 	return 0, nil
 }
 
@@ -270,48 +308,6 @@ func proxyEnvWithBase(baseEnv []string, addr string) []string {
 	)
 }
 
-// RunInternalLinuxExec applies Linux sandboxing and execs the target command.
-// It is intentionally reachable only through the internal command path.
-func runInternalLinuxExecLinux(_ []string) (int, error) {
-	payload, err := decodeLinuxExecPayload(os.Getenv(internalLinuxPayloadEnv))
-	if err != nil {
-		return 1, err
-	}
-
-	p := &payload.Profile
-	if len(p.Command) == 0 {
-		return 1, fmt.Errorf("internal linux payload has empty command")
-	}
-
-	if err := setNoNewPrivs(); err != nil {
-		return 1, fmt.Errorf("set no_new_privs: %w", err)
-	}
-
-	if err := applyLandlock(p); err != nil {
-		return 1, fmt.Errorf("apply landlock: %w", err)
-	}
-
-	if err := applySeccomp(p); err != nil {
-		return 1, fmt.Errorf("apply seccomp: %w", err)
-	}
-
-	if p.WorkDir != "" {
-		if err := os.Chdir(p.WorkDir); err != nil {
-			return 1, fmt.Errorf("chdir %q: %w", p.WorkDir, err)
-		}
-	}
-
-	cmdPath, err := resolveCommandPath(p.Command[0])
-	if err != nil {
-		return 1, fmt.Errorf("resolve command %q: %w", p.Command[0], err)
-	}
-
-	if err := syscall.Exec(cmdPath, p.Command, os.Environ()); err != nil {
-		return 1, fmt.Errorf("exec %q: %w", cmdPath, err)
-	}
-	return 0, nil
-}
-
 func resolveCommandPath(command string) (string, error) {
 	if strings.Contains(command, "/") {
 		return command, nil
@@ -319,10 +315,13 @@ func resolveCommandPath(command string) (string, error) {
 	return exec.LookPath(command)
 }
 
+// setNoNewPrivs prevents this process and descendants from gaining privileges
+// via setuid/setgid binaries or file capabilities after sandbox setup starts.
 func setNoNewPrivs() error {
 	return unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)
 }
 
+// applyLandlock applies filesystem access rules using Landlock API.
 func applyLandlock(p *profile.Profile) error {
 	abi, err := landlockABIVersion()
 	if err != nil {

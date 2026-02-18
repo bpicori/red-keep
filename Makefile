@@ -32,7 +32,7 @@ test:
 	$(GO) test ./...
 
 ## integration-test: Run integration tests (macOS)
-integration-test: build
+integration-test-macos: build
 	bash tests/integration_macos.sh
 
 ## integration-test-linux: Run integration tests (Linux)
