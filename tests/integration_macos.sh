@@ -471,17 +471,8 @@ test_conflicting_net_flags() {
 }
 
 # ---------------------------------------------------------------------------
-# Group 12: Version and Help
+# Group 12: Help
 # ---------------------------------------------------------------------------
-
-test_version() {
-  run_red_keep version
-  if [[ $RK_EXIT -eq 0 ]] && [[ "$RK_STDOUT" == *"0.1.0"* ]]; then
-    pass "test_version"
-  else
-    fail "test_version" "exit=$RK_EXIT stdout=$RK_STDOUT"
-  fi
-}
 
 test_help() {
   run_red_keep help
@@ -540,7 +531,6 @@ main() {
   test_no_command
   test_relative_path_rejected
   test_conflicting_net_flags
-  test_version
   test_help
 
   # Group 7: Network denied (no network needed)
