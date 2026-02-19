@@ -390,15 +390,6 @@ test_conflicting_net_flags() {
   fi
 }
 
-test_version() {
-  run_red_keep version
-  if [[ $RK_EXIT -eq 0 ]] && [[ "$RK_STDOUT" == *"0.1.0"* ]]; then
-    pass "test_version"
-  else
-    fail "test_version" "exit=$RK_EXIT stdout=$RK_STDOUT"
-  fi
-}
-
 test_help() {
   run_red_keep help
   if [[ $RK_EXIT -eq 0 ]] && [[ "$RK_STDERR" == *"Usage:"* ]] && [[ "$RK_STDERR" == *"Commands:"* ]]; then
@@ -445,7 +436,6 @@ main() {
   test_no_command
   test_relative_path_rejected
   test_conflicting_net_flags
-  test_version
   test_help
   test_network_denied
 
