@@ -19,6 +19,8 @@ import (
 	"github.com/bpicori/red-keep/internal/proxy"
 )
 
+const SANDBOX_EXEC_PATH = "/usr/bin/sandbox-exec"
+
 // darwinSensitivePaths are always denied in the sandbox.
 var darwinSensitivePaths = []string{
 	"/etc/shadow",
@@ -109,7 +111,7 @@ func (d *darwinPlatform) Exec(p *profile.Profile) (int, error) {
 
 	// Run: sandbox-exec -f <profile> -- <command> [args...]
 	args := append([]string{"-f", profilePath, "--"}, p.Command...)
-	cmd := exec.Command("sandbox-exec", args...)
+	cmd := exec.Command(SANDBOX_EXEC_PATH, args...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

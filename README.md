@@ -19,12 +19,6 @@ red-keep run --allow-read /home/dev/myproject -- grep -r "TODO" .
 # Run with read-write access and full network
 red-keep run --allow-rw /tmp/output --allow-net -- curl https://example.com -o /tmp/output/file
 
-# Run with read-write access and full network and allow-domain example.com
-red-keep run --allow-rw /tmp/output --allow-net --allow-domain example.com -- curl https://example.com -o /tmp/output/file
-
-# Run with read-write access and full network and deny-domain example.com
-red-keep run --allow-rw /tmp/output --allow-net --deny-domain example.com -- curl https://example.com -o /tmp/output/file
-
 # Read-write to an output dir, network to specific APIs only
 red-keep run \
   --allow-read /home/dev/project \
@@ -42,6 +36,9 @@ red-keep run \
 
 # Interactive session with PTY
 red-keep run --allow-rw /home/dev/project --allow-pty -- bash
+
+# Run in a specific working directory
+red-keep run --dir /home/dev/project --allow-read /home/dev/project -- pwd
 
 # Inspect the generated profile
 red-keep run --show-profile --allow-read /home/dev/project --allow-net -- echo test
@@ -67,15 +64,15 @@ All paths must be absolute. Paths are resolved to their canonical form (symlinks
 
 | Flag                      | Repeatable | Description                                                                                            |
 | ------------------------- | ---------- | ------------------------------------------------------------------------------------------------------ |
-| `--allow-net`             | No         | Allow **all** network access (overrides domain filters)                                                |
+| `--allow-net`             | No         | Allow **all** network access. Cannot be combined with `--allow-domain` or `--deny-domain`.            |
 | `--allow-domain <domain>` | Yes        | Allow network access to a specific domain (enables filtered mode). Supports wildcards: `*.example.com` |
 | `--deny-domain <domain>`  | Yes        | Deny network access to a specific domain (enables filtered mode). Supports wildcards: `*.example.com`  |
 
 **Network modes:**
 
 - **Deny (default):** All outbound/inbound network access is blocked. Local Unix sockets are allowed for IPC.
-- **Allow:** Unrestricted network access (`--allow-net`).
-- **Filtered:** Domain-level control via a local forward proxy. When `--allow-domain` is used, only listed domains are reachable (allowlist). When `--deny-domain` is used, all domains are reachable except listed ones (denylist). The two flags are mutually exclusive and cannot be combined.
+- **Allow:** Unrestricted network access (`--allow-net`). Cannot be combined with domain filters.
+- **Filtered:** Domain-level control via a local forward proxy. Use `--allow-domain` (allowlist) or `--deny-domain` (denylist) without `--allow-net`. `--allow-domain` and `--deny-domain` are mutually exclusive and cannot be combined.
 
 #### Process and PTY
 
@@ -102,6 +99,7 @@ read_paths:
 allow_domains:
   - api.openai.com
 allow_exec: true
+work_dir: /home/dev/project
 command:
   - python
   - agent.py

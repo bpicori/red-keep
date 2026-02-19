@@ -9,24 +9,16 @@ import (
 	"github.com/bpicori/red-keep/internal/platform"
 )
 
-const version = "0.1.0"
-
 func main() {
-	var showHelp, showVersion bool
+	var showHelp bool
 	flag.BoolVar(&showHelp, "help", false, "Show help message")
 	flag.BoolVar(&showHelp, "h", false, "Show help message (shorthand)")
-	flag.BoolVar(&showVersion, "version", false, "Print version information")
-	flag.BoolVar(&showVersion, "v", false, "Print version information (shorthand)")
 
 	flag.Usage = printUsage
 	flag.Parse()
 
 	if showHelp {
 		printUsage()
-		return
-	}
-	if showVersion {
-		fmt.Printf("red-keep %s\n", version)
 		return
 	}
 
@@ -51,8 +43,6 @@ func main() {
 			os.Exit(1)
 		}
 		os.Exit(exitCode)
-	case "version":
-		fmt.Printf("red-keep %s\n", version)
 	case "help":
 		printUsage()
 	default:
@@ -70,7 +60,6 @@ Usage:
 
 Commands:
   run       Run a command inside a sandbox
-  version   Print version information
   help      Show this help message
 
 Supported platforms: macOS (Seatbelt), Linux (Landlock + seccomp)
