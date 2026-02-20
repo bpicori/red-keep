@@ -191,11 +191,6 @@ func (d *darwinPlatform) RunInternalSandboxExec(_ []string) (int, error) {
 	return 0, nil
 }
 
-// proxyEnv returns environment with proxy vars set.
-// Existing proxy vars are removed first, then replaced.
-func proxyEnv(addr string) []string {
-	return proxyEnvWithBase(os.Environ(), addr)
-}
 
 func proxyEnvWithBase(baseEnv []string, addr string) []string {
 	proxyURL := "http://" + addr
@@ -276,6 +271,8 @@ func (b *darwinProfileBuilder) writeSystemRules() {
 
 	// Read standard system paths needed for binary lookup and dyld.
 	b.sb.WriteString("; System paths for binary resolution and dyld\n")
+	// Deny known-sensitive paths before broad root/system read allowances.
+	writePathRules(&b.sb, "deny file-read* file-write*", darwinSensitivePaths)
 	writeLiteralRule(&b.sb, "allow file-read*", "/")
 	writePathRules(&b.sb, "allow file-read*", []string{
 		"/usr/lib",
