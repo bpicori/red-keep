@@ -105,7 +105,7 @@ func (l *linuxPlatform) GenerateProfile(p *profile.Profile) (string, error) {
 	return sb.String(), nil
 }
 
-func (l *linuxPlatform) Exec(p *profile.Profile) (int, error) {
+func (l *linuxPlatform) Exec(p *profile.Profile, opts ExecOptions) (int, error) {
 	// Start proxy only when domain filters are configured.
 	var proxyAddr string
 	if hasDomainFilters(p) {
@@ -134,17 +134,37 @@ func (l *linuxPlatform) Exec(p *profile.Profile) (int, error) {
 		return -1, fmt.Errorf("encode internal linux payload: %w", err)
 	}
 
-	exePath, err := os.Executable()
-	if err != nil {
-		return -1, fmt.Errorf("resolve executable path: %w", err)
+	exePath := opts.HelperBinaryPath
+	if exePath == "" {
+		exePath, err = os.Executable()
+		if err != nil {
+			return -1, fmt.Errorf("resolve executable path: %w", err)
+		}
 	}
 
-	cmd := exec.Command(exePath, "__redkeep_internal_linux_exec")
+	ctx := opts.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	cmd := exec.CommandContext(ctx, exePath, "__redkeep_internal_linux_exec")
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+	if opts.Stdin != nil {
+		cmd.Stdin = opts.Stdin
+	}
+	if opts.Stdout != nil {
+		cmd.Stdout = opts.Stdout
+	}
+	if opts.Stderr != nil {
+		cmd.Stderr = opts.Stderr
+	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Env = append(os.Environ(), InternalLinuxPayloadEnv+"="+encodedPayload)
+	baseEnv := os.Environ()
+	if len(opts.Env) > 0 {
+		baseEnv = append([]string{}, opts.Env...)
+	}
+	cmd.Env = append(baseEnv, InternalLinuxPayloadEnv+"="+encodedPayload)
 	if proxyAddr != "" {
 		cmd.Env = proxyEnvWithBase(cmd.Env, proxyAddr)
 	}

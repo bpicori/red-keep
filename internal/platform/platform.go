@@ -1,6 +1,23 @@
 package platform
 
-import "github.com/bpicori/red-keep/internal/profile"
+import (
+	"context"
+	"io"
+
+	"github.com/bpicori/red-keep/internal/profile"
+)
+
+// ExecOptions controls command process wiring.
+type ExecOptions struct {
+	Context context.Context
+	Stdin   io.Reader
+	Stdout  io.Writer
+	Stderr  io.Writer
+	Env     []string
+
+	// HelperBinaryPath is used by Linux internal trampoline execution.
+	HelperBinaryPath string
+}
 
 // Platform abstracts OS-specific sandbox behaviour.
 type Platform interface {
@@ -13,7 +30,7 @@ type Platform interface {
 	GenerateProfile(p *profile.Profile) (string, error)
 
 	// Exec runs the command in the sandbox. Returns the process exit code.
-	Exec(p *profile.Profile) (int, error)
+	Exec(p *profile.Profile, opts ExecOptions) (int, error)
 
 	// RunInternalSandboxExec executes the internal sandbox entrypoint.
 	// On Linux this applies kernel sandboxing before exec, and on

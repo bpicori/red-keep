@@ -6,8 +6,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/bpicori/red-keep/internal/platform"
-	"github.com/bpicori/red-keep/internal/profile"
+	"github.com/bpicori/red-keep/pkg/redkeep"
 	"gopkg.in/yaml.v3"
 )
 
@@ -253,42 +252,32 @@ func stringPtr(v string) *string {
 	return &v
 }
 
-// buildProfile constructs a Profile from resolved run options.
-func buildProfile(c *runConfigProfile) *profile.Profile {
-	allowNet := false
-	if c.AllowNet != nil {
-		allowNet = *c.AllowNet
-	}
-	allowExec := false
-	if c.AllowExec != nil {
-		allowExec = *c.AllowExec
-	}
-	allowPTY := false
-	if c.AllowPTY != nil {
-		allowPTY = *c.AllowPTY
-	}
-	showProfile := false
-	if c.ShowProfile != nil {
-		showProfile = *c.ShowProfile
-	}
-	workDir := ""
-	if c.WorkDir != nil {
-		workDir = *c.WorkDir
-	}
-
-	return &profile.Profile{
+// buildRequest constructs a redkeep run request from resolved run options.
+func buildRequest(c *runConfigProfile) redkeep.RunRequest {
+	req := redkeep.RunRequest{
 		ReadPaths:    append([]string{}, c.ReadPaths...),
 		WritePaths:   append([]string{}, c.WritePaths...),
 		RWPaths:      append([]string{}, c.RWPaths...),
-		AllowNet:     allowNet,
 		AllowDomains: append([]string{}, c.AllowDomains...),
 		DenyDomains:  append([]string{}, c.DenyDomains...),
-		AllowExec:    allowExec,
-		AllowPTY:     allowPTY,
-		WorkDir:      workDir,
-		ShowProfile:  showProfile,
 		Command:      append([]string{}, c.Command...),
 	}
+	if c.AllowNet != nil {
+		req.AllowNet = *c.AllowNet
+	}
+	if c.AllowExec != nil {
+		req.AllowExec = *c.AllowExec
+	}
+	if c.AllowPTY != nil {
+		req.AllowPTY = *c.AllowPTY
+	}
+	if c.ShowProfile != nil {
+		req.ShowProfile = *c.ShowProfile
+	}
+	if c.WorkDir != nil {
+		req.WorkDir = *c.WorkDir
+	}
+	return req
 }
 
 // RunCmd executes the "run" subcommand which runs a command inside
@@ -311,37 +300,19 @@ func RunCmd(args []string) int {
 		return 2
 	}
 
-	p := buildProfile(effective)
-
-	// Initialise the platform (darwin, linux, etc.).
-	plat, err := platform.New()
+	helperBinaryPath, _ := os.Executable()
+	result, err := redkeep.Run(buildRequest(effective), redkeep.RunIO{
+		Stdin:            os.Stdin,
+		Stdout:           os.Stdout,
+		Stderr:           os.Stderr,
+		HelperBinaryPath: helperBinaryPath,
+	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		return 1
 	}
-
-	// Validate the profile against platform-specific sensitive paths.
-	if err := p.Validate(plat.SensitivePaths()); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: invalid profile: %v\n", err)
-		return 1
+	if result.GeneratedProfile != "" {
+		fmt.Print(result.GeneratedProfile)
 	}
-
-	// --show-profile: print the generated sandbox profile and exit.
-	if p.ShowProfile {
-		sbpl, err := plat.GenerateProfile(p)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: generate profile: %v\n", err)
-			return 1
-		}
-		fmt.Print(sbpl)
-		return 0
-	}
-
-	// Execute the command inside the sandbox.
-	exitCode, err = plat.Exec(p)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		return 1
-	}
-	return exitCode
+	return result.ExitCode
 }

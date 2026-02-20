@@ -69,7 +69,7 @@ func (d *darwinPlatform) GenerateProfile(p *profile.Profile) (string, error) {
 	return b.sb.String(), nil
 }
 
-func (d *darwinPlatform) Exec(p *profile.Profile) (int, error) {
+func (d *darwinPlatform) Exec(p *profile.Profile, opts ExecOptions) (int, error) {
 	// Start proxy only when domain filters are configured.
 	var proxyAddr string
 	if hasDomainFilters(p) {
@@ -111,10 +111,23 @@ func (d *darwinPlatform) Exec(p *profile.Profile) (int, error) {
 
 	// Run: sandbox-exec -f <profile> -- <command> [args...]
 	args := append([]string{"-f", profilePath, "--"}, p.Command...)
-	cmd := exec.Command(SANDBOX_EXEC_PATH, args...)
+	ctx := opts.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	cmd := exec.CommandContext(ctx, SANDBOX_EXEC_PATH, args...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+	if opts.Stdin != nil {
+		cmd.Stdin = opts.Stdin
+	}
+	if opts.Stdout != nil {
+		cmd.Stdout = opts.Stdout
+	}
+	if opts.Stderr != nil {
+		cmd.Stderr = opts.Stderr
+	}
 
 	if p.WorkDir != "" {
 		cmd.Dir = p.WorkDir
@@ -122,7 +135,13 @@ func (d *darwinPlatform) Exec(p *profile.Profile) (int, error) {
 
 	// Route HTTP/HTTPS through local filtering proxy.
 	if proxyAddr != "" {
-		cmd.Env = proxyEnv(proxyAddr)
+		baseEnv := os.Environ()
+		if len(opts.Env) > 0 {
+			baseEnv = append([]string{}, opts.Env...)
+		}
+		cmd.Env = proxyEnvWithBase(baseEnv, proxyAddr)
+	} else if len(opts.Env) > 0 {
+		cmd.Env = append([]string{}, opts.Env...)
 	}
 
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -175,9 +194,12 @@ func (d *darwinPlatform) RunInternalSandboxExec(_ []string) (int, error) {
 // proxyEnv returns environment with proxy vars set.
 // Existing proxy vars are removed first, then replaced.
 func proxyEnv(addr string) []string {
+	return proxyEnvWithBase(os.Environ(), addr)
+}
+
+func proxyEnvWithBase(baseEnv []string, addr string) []string {
 	proxyURL := "http://" + addr
 
-	// Remove these proxy vars (upper/lower case).
 	skip := map[string]bool{
 		"HTTP_PROXY":  true,
 		"http_proxy":  true,
@@ -189,9 +211,8 @@ func proxyEnv(addr string) []string {
 		"all_proxy":   true,
 	}
 
-	environ := os.Environ()
-	env := make([]string, 0, len(environ)+6)
-	for _, e := range environ {
+	env := make([]string, 0, len(baseEnv)+6)
+	for _, e := range baseEnv {
 		name, _, _ := strings.Cut(e, "=")
 		if skip[name] {
 			continue
