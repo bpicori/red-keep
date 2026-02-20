@@ -276,6 +276,8 @@ func (b *darwinProfileBuilder) writeSystemRules() {
 
 	// Read standard system paths needed for binary lookup and dyld.
 	b.sb.WriteString("; System paths for binary resolution and dyld\n")
+	// Deny known-sensitive paths before broad root/system read allowances.
+	writePathRules(&b.sb, "deny file-read* file-write*", darwinSensitivePaths)
 	writeLiteralRule(&b.sb, "allow file-read*", "/")
 	writePathRules(&b.sb, "allow file-read*", []string{
 		"/usr/lib",

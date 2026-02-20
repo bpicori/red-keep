@@ -618,3 +618,22 @@ func TestGenerateProfile_DomainFilteringDoesNotAffectFullNet(t *testing.T) {
 		t.Error("AllowNet should not restrict to localhost")
 	}
 }
+
+func TestGenerateProfile_SensitiveDenyPrecedesRootAllow(t *testing.T) {
+	d := &darwinPlatform{}
+	p := &profile.Profile{
+		Command: []string{"echo"},
+	}
+	sbpl, err := d.GenerateProfile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	denyIdx := strings.Index(sbpl, `(deny file-read* file-write* (subpath "/etc/passwd"))`)
+	allowIdx := strings.Index(sbpl, `(allow file-read* (literal "/"))`)
+	if denyIdx < 0 || allowIdx < 0 {
+		t.Fatalf("expected both passwd deny and root allow rules in profile")
+	}
+	if denyIdx > allowIdx {
+		t.Fatal("sensitive deny rules must be emitted before broad root allow")
+	}
+}
